@@ -1,0 +1,110 @@
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TapTap</title>
+
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/app.js" defer></script>
+  <script src="/static/history.js" defer></script>
+</head>
+<body>
+
+<header>
+  <div><h1><img src="/static/icons/calendar.svg" style="width:24px;height:24px;">TapTap</h1></div>
+  <div style="display:flex;align-items:center;gap:12px;">
+    <span id="mode-switch">
+      <button id="mode-light" onclick="setMode('light')"><img src="/static/icons/sun.svg" class="icon"> Light</button>
+      <button id="mode-dark" onclick="setMode('dark')"><img src="/static/icons/moon.svg" class="icon"> Dark</button>
+    </span>
+    <span id="clock"><img src="/static/icons/clock.svg" class="icon" style="width:14px;height:14px;"> --</span>
+    <span id="countdown" style="color:var(--primary);font-size:0.82rem;font-weight:600;margin-left:4px;"></span>
+  </div>
+</header>
+
+<main>
+  <!-- Add / Edit form -->
+  <div id="form-card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+      <h2 id="form-title" style="margin-bottom:0;"><img src="/static/icons/plus.svg" class="icon"> Add New Event</h2>
+      <button class="btn btn-success btn-sm" onclick="loadEvents(); showToast('Refreshed', 2000);" title="Reload event list" style="min-width:110px;padding:7px 14px;">Refresh</button>
+    </div>
+    <input type="hidden" id="edit-id">
+    <div class="form-grid">
+      <div class="full">
+        <label>Event Name</label>
+        <input id="ev-name" placeholder="e.g. Meeting with Bob" autofocus>
+      </div>
+      <div class="full">
+        <label>Description (optional)</label>
+        <textarea id="ev-desc" placeholder="Notes…"></textarea>
+      </div>
+      <div>
+        <label>Date</label>
+        <input id="ev-date" type="date">
+      </div>
+      <div>
+        <label>Time</label>
+        <input id="ev-time" type="time">
+      </div>
+      <div>
+        <label>Reminder (minutes before, comma for multiple)</label>
+        <input id="ev-reminder" type="text" value="15" placeholder="e.g. 60, 30, 10">
+      </div>
+      <div>
+        <label>Recurrence</label>
+        <select id="ev-recurrence" onchange="toggleCustomRecur()">
+          <option value="none">None</option>
+          <option value="daily">Daily</option>
+          <option value="weekly">Weekly</option>
+          <option value="monthly">Monthly</option>
+          <option value="yearly">Yearly</option>
+          <option value="custom">Custom…</option>
+        </select>
+      </div>
+      <div id="custom-recur" style="display:none;">
+        <label>Every</label>
+        <div style="display:flex;gap:8px;max-width:200px;">
+          <input id="custom-n" type="number" value="2" min="1" max="365" style="width:60px;">
+          <select id="custom-unit">
+            <option value="days">Days</option>
+            <option value="weeks">Weeks</option>
+            <option value="months">Months</option>
+            <option value="years">Years</option>
+          </select>
+        </div>
+      </div>
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-default" id="btn-cancel" style="display:none" onclick="cancelEdit()" title="Discard changes and return to add mode"><img src="/static/icons/x.svg" class="icon"> Cancel</button>
+      <button class="btn btn-primary" id="btn-save" onclick="saveEvent()" title="Save this event to your reminder list"><img src="/static/icons/plus-white.svg" class="icon"> Add Event</button>
+    </div>
+  </div>
+
+  <!-- Events -->
+  <div style="display:flex;justify-content:flex-end;margin-bottom:12px;">
+    <button id="history-toggle" class="btn btn-default btn-sm" onclick="toggleHistory()" style="min-width:120px;">
+      <img src="/static/icons/clock.svg" class="icon"> Past Events
+    </button>
+  </div>
+  <div id="event-list"></div>
+  <div id="empty">
+    <p>No events yet. Add one above!</p>
+  </div>
+
+</main>
+
+<!-- History panel -->
+<div id="history-panel" style="display:none;max-width:900px;margin:0 auto;padding:0 24px 80px;">
+  <div id="history-actions" style="display:none;gap:8px;margin-bottom:12px;align-items:center;">
+    <button id="btn-select-mode" class="btn btn-sm btn-default" onclick="toggleSelectMode()" style="min-width:100px;">Select</button>
+    <button id="btn-select-all" class="btn btn-sm btn-default" onclick="toggleSelectAll()" style="display:none;min-width:110px;">Select All</button>
+    <button id="btn-delete-sel" class="btn btn-sm btn-danger" onclick="deleteSelected()" style="display:none;min-width:140px;"><img src="/static/icons/trash-white.svg" class="icon"> Delete</button>
+    <span id="selected-count" style="font-size:0.82rem;color:var(--text-dim);"></span>
+  </div>
+  <div id="history-list" style="display:flex;flex-direction:column;gap:8px;"></div>
+</div>
+
+<div id="status"><span class="dot"></span> Ready — polling every 1 s</div>
+
+</body>
