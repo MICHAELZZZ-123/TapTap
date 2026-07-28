@@ -33,11 +33,14 @@ app = Flask(
 )
 db = EventDB()
 
-# Tiny inline favicon to stop 404 noise
+# Inline favicon — teal circle with a bold white bell (size-optimized for 16×16 tab icon)
 _FAVICON = (
     '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">'
-    '<circle cx="16" cy="16" r="14" fill="#0097a7"/>'
-    '<text x="16" y="22" text-anchor="middle" font-size="20">⏰</text>'
+    '<circle cx="16" cy="16" r="15" fill="#0097a7"/>'
+    '<path d="M22 13a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"'
+    ' fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>'
+    '<path d="M14.5 24a3 3 0 0 0 3 0"'
+    ' fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>'
     "</svg>"
 )
 
@@ -45,7 +48,9 @@ _FAVICON = (
 
 @app.route("/static/<path:filename>")
 def static_files(filename):
-    return send_from_directory(_os.path.join(_BASE_DIR, "static"), filename)
+    resp = send_from_directory(_os.path.join(_BASE_DIR, "static"), filename)
+    resp.cache_control.max_age = 3600  # cache static assets for 1 hour
+    return resp
 
 # ── Routes ─────────────────────────────────────────────────────────────────
 
@@ -75,6 +80,7 @@ def api_add_event():
         description=data.get("description", ""),
         reminder_min=data.get("reminder_min", 15),
         recurrence=data.get("recurrence", "none"),
+        category=data.get("category", ""),
     )
     return jsonify({"id": eid}), 201
 
@@ -91,6 +97,7 @@ def api_update_event(event_id):
         description=data.get("description", ""),
         reminder_min=data.get("reminder_min", 15),
         recurrence=data.get("recurrence", "none"),
+        category=data.get("category", ""),
     )
     return jsonify({"ok": True})
 
@@ -126,7 +133,8 @@ def api_history():
 
 @app.route("/api/events/<int:event_id>/snooze", methods=["POST"])
 def api_snooze_event(event_id):
-    db.snooze(event_id, minutes=5)
+    minutes = max(1, min(1440, request.args.get("minutes", 5, type=int) or 5))
+    db.snooze(event_id, minutes=minutes)
     return jsonify({"ok": True})
 
 @app.route("/api/pending")
@@ -186,9 +194,43 @@ def api_pending():
             else:
                 db.deactivate(ev["id"])
 
+    # Periodic DB cleanup — trim history older than 90 days (once per hour)
+    if not getattr(api_pending, "_last_cleanup", None) or \
+       (now - api_pending._last_cleanup).total_seconds() > 3600:
+        with db._connect() as conn:
+            conn.execute(
+                "DELETE FROM events WHERE active=0 AND "
+                "event_date < date('now','localtime','-90 days')"
+            )
+            conn.commit()
+        api_pending._last_cleanup = now
+
+    # Compute next-up countdown for the frontend (skip snoozed events)
+    next_at = None
+    for ev in events:
+        if ev["snooze_until"]:
+            try:
+                until = datetime.strptime(ev["snooze_until"], "%Y-%m-%d %H:%M:%S")
+                if now < until:
+                    continue
+            except ValueError:
+                pass
+        try:
+            dt = combine_datetime(ev["event_date"], ev["event_time"])
+        except ValueError:
+            continue
+        offsets = parse_offsets(ev["reminder_min"])
+        for off in offsets:
+            remind_at = dt - timedelta(minutes=off)
+            if remind_at > now and (next_at is None or remind_at < next_at):
+                next_at = remind_at
+        if dt > now and (next_at is None or dt < next_at):
+            next_at = dt
+
     return jsonify({
         "reminders": fired,
-        "status": f"{len(events)} event(s)  |  Polling every 1 s",
+        "status": f"{len(events)} event(s)",
+        "next_at": next_at.isoformat() if next_at else None,
     })
 
 @app.route("/api/time")

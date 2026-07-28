@@ -31,11 +31,14 @@ If blocked: click the lock/lock-icon in the address bar → Notifications → Al
 | Feature | Detail |
 |---|---|
 | Reminders | Single (e.g. `15`) or multiple comma-separated offsets (e.g. `60, 30, 10`). Accepts both `,` and `，` |
+| Categories | Tag events as Work, Personal, Health, Other, or a custom label — colored dots and left-border accents |
+| Configurable snooze | Dropdown on each event card (1m / 5m / 10m / 15m / 30m / custom); 2m / 5m / 15m quick-snooze on popups |
 | Custom recurrence | Every N days/weeks/months/years — choose "Custom…" in the dropdown |
-| Desktop popup | Bottom-right, stays until you click ✕, with quick-snooze button |
+| Adaptive polling | 5 s normally, 1 s when a reminder is imminent; pauses when the tab is hidden |
+| Desktop popup | Bottom-right, stays until you click ✕, with quick-snooze buttons |
 | Sound | Two-tone chirp on reminder |
-| Undo delete | 8-second toast with "Undo" to restore a deleted event |
-| Countdown | Header shows minutes until your next upcoming reminder |
+| Undo delete | 3-second toast with "Undo" to restore a deleted event; hover pauses the timer |
+| Countdown | Header shows seconds/minutes until your next upcoming reminder |
 | History | Past events saved as templates — click "Reuse" to recreate |
 | Dark/light | Mode switch in header, remembers your choice |
 | Gone toast | Adding an event in the past shows "Gone is gone, my friend" — rejected |

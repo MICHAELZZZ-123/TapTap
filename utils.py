@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import subprocess
 from datetime import datetime, timedelta
 
 # ── Constants ──────────────────────────────────────────────────────────────
@@ -70,18 +69,3 @@ def parse_reminded(raw) -> set[int]:
         return {int(x.strip()) for x in s.split(",") if x.strip()}
     except (ValueError, TypeError):
         return set()
-
-
-# ── Native notification (best-effort) ──────────────────────────────────────
-
-def try_native_notify(title: str, message: str):
-    """Attempt a native desktop notification via notify-send (Linux).
-    Fails silently — the TUI toast is the primary notification channel."""
-    try:
-        subprocess.run(
-            ["notify-send", title, message, "--icon=appointment"],
-            timeout=3,
-            capture_output=True,
-        )
-    except Exception:
-        pass

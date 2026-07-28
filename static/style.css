@@ -171,6 +171,41 @@ textarea { resize: vertical; min-height: 40px; }
 }
 .tag-recur { background: var(--info); color: #fff; }
 .tag-reminder { background: var(--warning); color: #fff; }
+
+/* ── Category indicators ────────────────────────────── */
+.cat-dot {
+  display: inline-block; width: 10px; height: 10px;
+  border-radius: 50%; margin-left: 6px; flex-shrink: 0;
+}
+.cat-dot-work     { background: #0d6efd; }
+.cat-dot-personal { background: #198754; }
+.cat-dot-health   { background: #dc3545; }
+.cat-dot-other    { background: #6c757d; }
+.cat-dot-custom   { background: #7c3aed; }
+
+.event-card.cat-work     { border-left: 4px solid #0d6efd; }
+.event-card.cat-personal { border-left: 4px solid #198754; }
+.event-card.cat-health   { border-left: 4px solid #dc3545; }
+.event-card.cat-other    { border-left: 4px solid #6c757d; }
+.event-card.cat-custom   { border-left: 4px solid #7c3aed; }
+
+/* ── Snooze group (button + select) ─────────────────── */
+.snooze-group {
+  display: inline-flex; align-items: center; gap: 2px;
+}
+.snooze-select {
+  width: auto; padding: 2px 4px; font-size: 0.68rem;
+  background: var(--warning); color: #fff;
+  border: none; border-radius: 4px; cursor: pointer;
+  min-height: 0; height: 24px; line-height: 1;
+}
+.snooze-custom {
+  width: 48px; padding: 2px 4px; font-size: 0.68rem;
+  background: var(--warning); color: #fff;
+  border: none; border-radius: 4px;
+  min-height: 0; height: 24px; line-height: 1;
+}
+
 .event-actions { display: flex; gap: 6px; flex-shrink: 0; align-items: center; }
 
 #empty {

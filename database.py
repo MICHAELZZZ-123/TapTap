@@ -44,6 +44,11 @@ class EventDB:
                 )
                 """
             )
+            # Migrate: add category column if upgrading from v0.1.0
+            try:
+                conn.execute("ALTER TABLE events ADD COLUMN category TEXT DEFAULT ''")
+            except sqlite3.OperationalError:
+                pass  # column already exists
             conn.commit()
 
     # ── CRUD ──────────────────────────────────────────────────────────────
@@ -56,13 +61,14 @@ class EventDB:
         description: str = "",
         reminder_min: int = 15,
         recurrence: str = "none",
+        category: str = "",
     ) -> int:
         with self._connect() as conn:
             cur = conn.execute(
                 """INSERT INTO events (name, description, event_date, event_time,
-                   reminder_min, recurrence)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (name, description, event_date, event_time, reminder_min, recurrence),
+                   reminder_min, recurrence, category)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (name, description, event_date, event_time, reminder_min, recurrence, category),
             )
             conn.commit()
             return cur.lastrowid
@@ -76,14 +82,15 @@ class EventDB:
         description: str = "",
         reminder_min: int = 15,
         recurrence: str = "none",
+        category: str = "",
     ):
         with self._connect() as conn:
             conn.execute(
                 """UPDATE events SET name=?, description=?, event_date=?,
-                   event_time=?, reminder_min=?, recurrence=?
+                   event_time=?, reminder_min=?, recurrence=?, category=?
                    WHERE id=?""",
                 (name, description, event_date, event_time,
-                 reminder_min, recurrence, event_id),
+                 reminder_min, recurrence, category, event_id),
             )
             conn.commit()
 

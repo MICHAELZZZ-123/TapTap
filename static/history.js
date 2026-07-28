@@ -1,10 +1,41 @@
 // ── History ─────────────────────────────────────────────
 let _historyOpen = false;
+
+async function _renderHistory() {
+  const list = document.getElementById('history-list');
+  const actions = document.getElementById('history-actions');
+  const events = await api('GET', '/api/history');
+  if (!events.length) {
+    list.innerHTML = '<p style=\"color:var(--text-dim);font-size:0.85rem;text-align:center;\">No past events.</p>';
+    actions.style.display = 'none';
+    return;
+  }
+  actions.style.display = 'flex';
+  list.innerHTML = events.map(ev => {
+    const recur = ev.recurrence;
+    const recDisplay = recur === 'none' ? 'once' :
+      ['daily','weekly','monthly','yearly'].includes(recur) ? recur :
+      recur.replace(':', ' every ') + 's'.replace('ss','s');
+    return '<div class=\"event-card\" style=\"opacity:0.7;\">'
+      + '<input type=\"checkbox\" class=\"hist-cb\" value=\"' + ev.id + '\" onchange=\"updateSelected()\" style=\"display:none;width:auto;flex-shrink:0;\">'
+      + '<div class=\"event-info\">'
+      + '<div class=\"event-name\">' + esc(ev.name) + (function(c){var k=['work','personal','health','other'];return c?(k.includes(c)?'<span class=\"cat-dot cat-dot-'+c+'\" title=\"'+c+'\"></span>':'<span class=\"cat-dot cat-dot-custom\" title=\"'+c+'\"></span>'):'';})(ev.category) + '</div>'
+      + '<div class=\"event-meta\"><img src=\"/static/icons/calendar.svg\" class=\"icon\" style=\"width:12px;height:12px;\"> '
+      + ev.event_date + ' at ' + ev.event_time
+      + ' · <img src=\"/static/icons/clock.svg\" class=\"icon\" style=\"width:12px;height:12px;\"> ' + ev.reminder_min + 'm · ' + recDisplay
+      + '</div></div>'
+      + '<button class=\"btn btn-danger btn-sm\" onclick=\"deleteOneHist(' + ev.id + ')\" title=\"Delete permanently\">'
+      + '<img src=\"/static/icons/trash-white.svg\" class=\"icon\"></button>'
+      + '<button class=\"btn btn-primary btn-sm\" onclick=\"reuseEvent(' + ev.id + ')\" title=\"Use as template for a new event\">'
+      + '<img src=\"/static/icons/plus-white.svg\" class=\"icon\"> Reuse</button>'
+      + '</div>';
+  }).join('');
+  updateSelected();
+}
+
 async function toggleHistory() {
   _historyOpen = !_historyOpen;
   const panel = document.getElementById('history-panel');
-  const list = document.getElementById('history-list');
-  const actions = document.getElementById('history-actions');
   const btn = document.getElementById('history-toggle');
   if (!_historyOpen) {
     panel.style.display = 'none';
@@ -16,33 +47,7 @@ async function toggleHistory() {
     return;
   }
   btn.innerHTML = '<img src=\"/static/icons/clock.svg\" class=\"icon\"> Past Events ▾';
-  const events = await api('GET', '/api/history');
-  if (!events.length) {
-    list.innerHTML = '<p style=\"color:var(--text-dim);font-size:0.85rem;text-align:center;\">No past events.</p>';
-    actions.style.display = 'none';
-  } else {
-    actions.style.display = 'flex';
-    list.innerHTML = events.map(ev => {
-      const recur = ev.recurrence;
-      const recDisplay = recur === 'none' ? 'once' :
-        ['daily','weekly','monthly','yearly'].includes(recur) ? recur :
-        recur.replace(':', ' every ') + 's'.replace('ss','s');
-      return '<div class=\"event-card\" style=\"opacity:0.7;\">'
-        + '<input type=\"checkbox\" class=\"hist-cb\" value=\"' + ev.id + '\" onchange=\"updateSelected()\" style=\"display:none;width:auto;flex-shrink:0;\">'
-        + '<div class=\"event-info\">'
-        + '<div class=\"event-name\">' + esc(ev.name) + '</div>'
-        + '<div class=\"event-meta\"><img src=\"/static/icons/calendar.svg\" class=\"icon\" style=\"width:12px;height:12px;\"> '
-        + ev.event_date + ' at ' + ev.event_time
-        + ' · ⏰ ' + ev.reminder_min + 'm · ' + recDisplay
-        + '</div></div>'
-        + '<button class=\"btn btn-danger btn-sm\" onclick=\"deleteOneHist(' + ev.id + ')\" title=\"Delete permanently\">'
-        + '<img src=\"/static/icons/trash-white.svg\" class=\"icon\"></button>'
-        + '<button class=\"btn btn-primary btn-sm\" onclick=\"reuseEvent(' + ev.id + ')\" title=\"Use as template for a new event\">'
-        + '<img src=\"/static/icons/plus-white.svg\" class=\"icon\"> Reuse</button>'
-        + '</div>';
-    }).join('');
-    updateSelected();
-  }
+  await _renderHistory();
   panel.style.display = 'block';
   panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
@@ -81,17 +86,19 @@ async function deleteSelected() {
   const cbs = document.querySelectorAll('.hist-cb:checked');
   if (!cbs.length) { showToast('Nothing selected.'); return; }
   if (!confirm('Delete ' + cbs.length + ' event(s) permanently?')) return;
+  let deleted = 0;
   for (const cb of cbs) {
-    await api('DELETE', '/api/events/' + cb.value + '?permanent=1');
+    try { await api('DELETE', '/api/events/' + cb.value + '?permanent=1'); deleted++; }
+    catch(e) { /* skip failed deletes */ }
   }
-  showToast('Deleted ' + cbs.length + ' event(s).');
-  toggleHistory(); toggleHistory(); // refresh
+  showToast('Deleted ' + deleted + ' event(s).');
+  _renderHistory();
 }
 async function deleteOneHist(id) {
   if (!confirm('Delete this event permanently?')) return;
   await api('DELETE', '/api/events/' + id + '?permanent=1');
   showToast('Deleted.');
-  toggleHistory(); toggleHistory();
+  _renderHistory();
 }
 
 async function reuseEvent(id) {
@@ -114,6 +121,19 @@ async function reuseEvent(id) {
     document.getElementById('custom-n').value = parts[0] || '2';
     document.getElementById('custom-unit').value = parts[1] || 'days';
     document.getElementById('custom-recur').style.display = 'block';
+  }
+  const presets = ['', 'work', 'personal', 'health', 'other'];
+  const cat = ev.category || '';
+  if (presets.includes(cat)) {
+    document.getElementById('ev-category').value = cat;
+    document.getElementById('custom-cat').style.display = 'none';
+  } else if (cat) {
+    document.getElementById('ev-category').value = 'custom';
+    document.getElementById('custom-cat-name').value = cat;
+    document.getElementById('custom-cat').style.display = 'block';
+  } else {
+    document.getElementById('ev-category').value = '';
+    document.getElementById('custom-cat').style.display = 'none';
   }
   document.getElementById('ev-name').focus();
   window.scrollTo({top:0, behavior:'smooth'});
