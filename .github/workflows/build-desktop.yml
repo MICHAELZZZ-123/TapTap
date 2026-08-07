@@ -2,6 +2,7 @@ name: Build desktop apps
 
 # PACKAGING: PyInstaller must build on the target OS; Linux cannot emit TapTap.exe.
 on:
+  pull_request:
   workflow_dispatch:
   push:
     tags:
