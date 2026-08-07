@@ -1,6 +1,6 @@
 Flask>=3.1.3,<4
 desktop-notifier>=6.2,<7
-filelock>=3.16,<4
+filelock>=3.32.2,<4
 platformdirs>=4.3,<5
 # PACKAGING: Linux uses Qt; Windows/macOS use pywebview's native backends.
 pywebview[pyside6]>=6.2,<7; sys_platform == "linux"
