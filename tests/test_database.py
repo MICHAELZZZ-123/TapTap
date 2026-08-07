@@ -32,6 +32,15 @@ class DatabaseTests(unittest.TestCase):
         values.update(overrides)
         return self.db.add_event(**values)
 
+    def test_connection_context_always_closes_connection(self) -> None:
+        with self.db._connect() as connection:
+            connection.execute("SELECT 1").fetchone()
+
+        # Regression guard: Windows cannot remove a temporary database while a
+        # SQLite connection still owns a file handle.
+        with self.assertRaises(sqlite3.ProgrammingError):
+            connection.execute("SELECT 1")
+
     def test_recurrence_math_preserves_supported_rules(self) -> None:
         self.assertEqual(_next_date(date(2030, 1, 2), "daily"), date(2030, 1, 3))
         self.assertEqual(_next_date(date(2030, 1, 2), "weekly"), date(2030, 1, 9))
