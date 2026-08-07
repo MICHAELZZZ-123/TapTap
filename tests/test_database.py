@@ -4,6 +4,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime
 from pathlib import Path
@@ -132,7 +133,8 @@ class DatabaseTests(unittest.TestCase):
 
     def test_legacy_database_migration_preserves_existing_events(self) -> None:
         legacy_path = Path(self.temp_dir.name) / "legacy.db"
-        with sqlite3.connect(legacy_path) as connection:
+        # PORTABILITY: closing() releases the test fixture's Windows file handle.
+        with closing(sqlite3.connect(legacy_path)) as connection:
             connection.execute(
                 """CREATE TABLE events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
