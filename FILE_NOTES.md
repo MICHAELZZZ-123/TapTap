@@ -41,6 +41,7 @@ rebuilt.
 | `taptap.spec` | PyInstaller asset, backend, metadata, and executable configuration | It bundles the complete `templates/` and `static/` trees, so a rebuild includes newly added assets automatically. |
 | `scripts/build_desktop.py` | Reproducible current-platform build entry point | On Linux it stages the NSS/XKB/XCB libraries Qt needs, downloading Debian/Ubuntu packages without sudo only when necessary. |
 | `scripts/generate_icons.py` | Regenerates PNG/ICO artwork from the SVG source | Review generated image changes before committing them. |
+| `scripts/smoke_test_windows_window.ps1` | Verifies that a frozen Windows build creates a responsive native window | Run only on Windows; it isolates test data and stops only processes that it started. |
 | `.github/workflows/build-desktop.yml` | Native Windows and Linux CI builds | A real Windows `.exe` must be produced by this Windows runner or on a Windows machine. |
 | `version_info.txt` | Windows executable version metadata | Update it when publishing a new application version. |
 | `TapTap.sh` | Convenience launcher for the Linux artifact | It expects `dist/TapTap` to exist. |

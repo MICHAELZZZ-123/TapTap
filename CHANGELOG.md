@@ -20,6 +20,10 @@ clearer repository ownership without changing TapTap's original feature set.
   0.2.1.
 
 ### Fixed
+- Windows builds now pass ICO artwork to WinForms instead of crashing silently
+  when `System.Drawing.Icon` receives PNG artwork.
+- Windows CI now requires the packaged executable to create a responsive native
+  `TapTap` window instead of validating only the `--help` path.
 - Fresh builds now contain all six category SVGs instead of relying on files
   added after an earlier executable was produced.
 - Form defaults and reused history templates use the local calendar date rather

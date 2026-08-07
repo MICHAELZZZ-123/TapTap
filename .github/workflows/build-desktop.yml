@@ -54,8 +54,13 @@ jobs:
       - name: Build executable
         run: python scripts/build_desktop.py
 
-      - name: Smoke-test executable startup
+      - name: Smoke-test executable bootstrap
         run: python -c "import subprocess; subprocess.run([r'${{ matrix.output }}', '--help'], check=True)"
+
+      - name: Smoke-test Windows native window
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/smoke_test_windows_window.ps1 -Executable '${{ matrix.output }}'
 
       - name: Upload executable
         uses: actions/upload-artifact@v7

@@ -288,6 +288,15 @@ def _show_message(title: str, message: str) -> None:
     print(f"{title}: {message}", file=sys.stderr)
 
 
+def _desktop_icon_path(platform_name: str | None = None) -> str:
+    """Return artwork in the format accepted by the native window backend."""
+    target = platform_name or sys.platform
+    # PACKAGING: WinForms System.Drawing.Icon requires ICO; passing PNG raises
+    # an uncatchable CLR exception on pywebview's UI thread.
+    filename = "app-icon.ico" if target == "win32" else "app-icon.png"
+    return os.path.join(_BASE_DIR, "static", filename)
+
+
 def _run_desktop(debug: bool = False) -> None:
     global _DESKTOP_MODE
 
@@ -297,7 +306,7 @@ def _run_desktop(debug: bool = False) -> None:
     _DATA_DIR.mkdir(parents=True, exist_ok=True)
     storage_path = _DATA_DIR / "webview"
     storage_path.mkdir(parents=True, exist_ok=True)
-    icon_path = os.path.join(_BASE_DIR, "static", "app-icon.png")
+    icon_path = _desktop_icon_path()
 
     webview.settings["OPEN_EXTERNAL_LINKS_IN_BROWSER"] = True
     webview.create_window(

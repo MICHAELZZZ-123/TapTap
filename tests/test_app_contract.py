@@ -216,6 +216,16 @@ class AppContractTests(unittest.TestCase):
                     self.assertEqual(response.status_code, 200)
                     self.assertIn(b"<svg", response.data)
 
+    def test_desktop_icon_format_matches_native_backend(self) -> None:
+        windows_icon = Path(self.module._desktop_icon_path("win32"))
+        other_icon = Path(self.module._desktop_icon_path("linux"))
+
+        # Regression guard: WinForms crashes on its UI thread if given a PNG.
+        self.assertEqual(windows_icon.name, "app-icon.ico")
+        self.assertEqual(other_icon.name, "app-icon.png")
+        self.assertTrue(windows_icon.is_file())
+        self.assertTrue(other_icon.is_file())
+
     def test_api_requires_the_process_token(self) -> None:
         self.assertEqual(self.client.get("/api/events").status_code, 403)
         response = self.client.get("/api/events", headers=self.headers)
