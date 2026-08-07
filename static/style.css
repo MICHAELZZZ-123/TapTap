@@ -1,3 +1,4 @@
+/* INVARIANT (theme): Keep the same variable names in both modes. */
 body.light {
   --bg: #f0f2f5;
   --surface: #ffffff;
@@ -111,6 +112,18 @@ body.dark input, body.dark select, body.dark textarea {
   box-shadow: none;
 }
 textarea { resize: vertical; min-height: 40px; }
+.category-select-wrap { position: relative; }
+.category-select-wrap select { padding-left: 40px; }
+.category-select-icon {
+  position: absolute;
+  z-index: 1;
+  left: 12px;
+  top: 50%;
+  width: 18px;
+  height: 18px;
+  transform: translateY(-50%);
+  pointer-events: none;
+}
 .form-actions {
   display: flex;
   gap: 10px;

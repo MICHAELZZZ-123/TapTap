@@ -50,7 +50,9 @@ def parse_offsets(raw) -> list[int]:
     """Parse comma-separated reminder offsets. Accepts both ',' and '，'."""
     try:
         s = str(raw).replace("，", ",")
-        return [int(x.strip()) for x in s.split(",") if x.strip()]
+        values = [int(x.strip()) for x in s.split(",") if x.strip()]
+        # INVARIANT: Preserve input order while deduplicating identical offsets.
+        return list(dict.fromkeys(values))
     except (ValueError, TypeError):
         return []
 
@@ -62,7 +64,8 @@ def parse_reminded(raw) -> set[int]:
     if not raw:
         return set()
     s = str(raw)
-    if ":" in s:  # legacy datetime format — all offsets already fired
+    # COMPATIBILITY: Legacy timestamps mean every offset was already handled.
+    if ":" in s:
         return {99999}  # sentinel: block all offsets
     try:
         s = s.replace("，", ",")

@@ -2,31 +2,102 @@
 """PyInstaller spec for TapTap — builds a standalone executable."""
 
 import os
+import sys
+from glob import glob
 
 _base = SPECPATH
 
-# Collect all data files to bundle
+# PACKAGING: Collect complete UI trees so future assets are not silently omitted.
 added_files = [
-    (os.path.join(_base, "templates", "index.html"), "templates"),
-    (os.path.join(_base, "static", "style.css"), "static"),
-    (os.path.join(_base, "static", "app.js"), "static"),
-    (os.path.join(_base, "static", "history.js"), "static"),
+    (os.path.join(_base, "templates"), "templates"),
+    (os.path.join(_base, "static"), "static"),
 ]
-# Add every SVG icon
-icons_dir = os.path.join(_base, "static", "icons")
-for f in os.listdir(icons_dir):
-    if f.endswith(".svg"):
-        added_files.append((os.path.join(icons_dir, f), os.path.join("static", "icons")))
+bundled_binaries = []
+
+# PACKAGING: PySide ships Qt itself, but Linux wheels rely on a small set of
+# NSS/XKB/XCB system libraries. The build helper stages them here so the final
+# one-file executable also works on a minimal desktop installation.
+linux_runtime_dir = os.environ.get("TAPTAP_LINUX_RUNTIME_DIR")
+if sys.platform.startswith("linux") and linux_runtime_dir:
+    bundled_binaries.extend(
+        (path, ".") for path in glob(os.path.join(linux_runtime_dir, "*.so*"))
+    )
+    added_files.extend(
+        (path, ".") for path in glob(os.path.join(linux_runtime_dir, "*.chk"))
+    )
+
+hidden_imports = [
+    "database",
+    "reminders",
+    "utils",
+    "flask",
+    "werkzeug",
+    "jinja2",
+    "sqlite3",
+    "filelock",
+    "platformdirs",
+]
+
+# PACKAGING: SSL and Bottle's optional adapters are unused by this loopback app.
+excluded_modules = ["cryptography", "OpenSSL", "twisted", "zope"]
+if sys.platform.startswith("linux"):
+    hidden_imports += ["desktop_notifier.backends.dbus", "webview.platforms.qt"]
+    excluded_modules += [
+        "gi",
+        "PyQt5",
+        "PyQt6",
+        "PySide2",
+        "cefpython3",
+        "desktop_notifier.backends.macos",
+        "desktop_notifier.backends.macos_support",
+        "desktop_notifier.backends.winrt",
+        "webview.platforms.android",
+        "webview.platforms.cef",
+        "webview.platforms.cocoa",
+        "webview.platforms.edgechromium",
+        "webview.platforms.gtk",
+        "webview.platforms.mshtml",
+        "webview.platforms.winforms",
+    ]
+elif sys.platform == "win32":
+    hidden_imports += [
+        "desktop_notifier.backends.winrt",
+        "webview.platforms.edgechromium",
+        "webview.platforms.winforms",
+    ]
+    excluded_modules += [
+        "desktop_notifier.backends.dbus",
+        "desktop_notifier.backends.macos",
+        "desktop_notifier.backends.macos_support",
+        "webview.platforms.android",
+        "webview.platforms.cef",
+        "webview.platforms.cocoa",
+        "webview.platforms.gtk",
+        "webview.platforms.qt",
+    ]
+elif sys.platform == "darwin":
+    hidden_imports += ["desktop_notifier.backends.macos", "webview.platforms.cocoa"]
+    excluded_modules += [
+        "desktop_notifier.backends.dbus",
+        "desktop_notifier.backends.winrt",
+        "webview.platforms.android",
+        "webview.platforms.cef",
+        "webview.platforms.edgechromium",
+        "webview.platforms.gtk",
+        "webview.platforms.mshtml",
+        "webview.platforms.qt",
+        "webview.platforms.winforms",
+    ]
 
 a = Analysis(
     [os.path.join(_base, "app.py")],
     pathex=[_base],
-    binaries=[],
+    binaries=bundled_binaries,
     datas=added_files,
-    hiddenimports=["flask", "werkzeug", "jinja2", "sqlite3", "database", "utils"],
+    hiddenimports=hidden_imports,
     hookspath=[],
     runtime_hooks=[],
-    excludes=[],
+    excludes=excluded_modules,
     noarchive=False,
 )
 
@@ -42,13 +113,35 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=True,
+    console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
+    icon=(
+        os.path.join(_base, "static", "app-icon.ico")
+        if sys.platform == "win32"
+        else None
+    ),
+    version=(
+        os.path.join(_base, "version_info.txt")
+        if sys.platform == "win32"
+        else None
+    ),
     codesign_identity=None,
     entitlements_file=None,
 )
+
+if sys.platform == "darwin":
+    app_bundle = BUNDLE(
+        exe,
+        name="TapTap.app",
+        icon=os.path.join(_base, "static", "app-icon.png"),
+        bundle_identifier="com.taptap.reminders",
+        info_plist={
+            "CFBundleShortVersionString": "0.2.1",
+            "NSHighResolutionCapable": True,
+        },
+    )

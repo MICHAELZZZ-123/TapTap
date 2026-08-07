@@ -1,3 +1,10 @@
+// SECURITY: The server injects a new API token for every process; never persist it.
+const API_TOKEN = document.querySelector('meta[name="taptap-api-token"]').content;
+const IS_DESKTOP = document.querySelector('meta[name="taptap-desktop"]').content === '1';
+// INVARIANT (cache): This query must follow app.py's _ASSET_VERSION.
+const ASSET_VERSION = document.querySelector('meta[name="taptap-asset-version"]').content;
+const ASSET_QUERY = '?v=' + encodeURIComponent(ASSET_VERSION);
+
 // ── Keyboard shortcuts ───────────────────────────────────
 document.addEventListener('keydown', function(e) {
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') {
@@ -50,8 +57,7 @@ let _clockOffset = 0;
 async function calibrateClock() {
   try {
     const t0 = Date.now();
-    const res = await fetch('/api/time');
-    const data = await res.json();
+    const data = await api('GET', '/api/time');
     const t1 = Date.now();
     // Estimate server time at the midpoint of the request round-trip
     const serverNow = data.timestamp * 1000;
@@ -65,6 +71,27 @@ async function calibrateClock() {
 
 function calibratedNow() {
   return new Date(Date.now() + _clockOffset);
+}
+
+// COMPATIBILITY: <input type="date"> needs local calendar fields, not UTC ISO fields.
+function localDateValue(value) {
+  const year = value.getFullYear();
+  const month = String(value.getMonth() + 1).padStart(2, '0');
+  const day = String(value.getDate()).padStart(2, '0');
+  return year + '-' + month + '-' + day;
+}
+
+function recurrenceLabel(value, noneLabel) {
+  // INVARIANT (display): Stored "N:units" rules are shown as natural text.
+  const recurrence = String(value || 'none');
+  if (recurrence === 'none') return noneLabel || '';
+  if (['daily', 'weekly', 'monthly', 'yearly'].includes(recurrence)) return recurrence;
+
+  const custom = recurrence.match(/^([1-9]\d*):(days|weeks|months|years)$/);
+  if (!custom) return recurrence;
+  const count = Number(custom[1]);
+  const unit = count === 1 ? custom[2].slice(0, -1) : custom[2];
+  return 'every ' + count + ' ' + unit;
 }
 
 calibrateClock();                         // calibrate immediately
@@ -91,7 +118,7 @@ pollReminders().then(() => _scheduleNextPoll());
 setInterval(updateClock, CLOCK_MS);
 setInterval(updateCountdown, 1000);  // countdown ticks every second (local, no server hit)
 
-// Pause polling when the tab is hidden; resume immediately when visible
+// UI polling can pause while hidden because Python delivers reminders in the background.
 document.addEventListener('visibilitychange', () => {
   _pollActive = !document.hidden;
   if (_pollTimer) { clearTimeout(_pollTimer); _pollTimer = null; }
@@ -100,15 +127,16 @@ document.addEventListener('visibilitychange', () => {
   }
 });
 
-// Set form defaults to current time (after calibratedNow is defined)
-document.getElementById('ev-date').value =
-  calibratedNow().toISOString().slice(0, 10);
+// Set form defaults to current local time (after calibratedNow is defined).
+const _initialNow = calibratedNow();
+document.getElementById('ev-date').value = localDateValue(_initialNow);
 document.getElementById('ev-time').value =
-  String(calibratedNow().getHours()).padStart(2, '0') + ':' +
-  String(calibratedNow().getMinutes()).padStart(2, '0');
+  String(_initialNow.getHours()).padStart(2, '0') + ':' +
+  String(_initialNow.getMinutes()).padStart(2, '0');
 updateClock();
 loadEvents();
 updateCountdown();
+updateCategoryIcon();
 refreshCategoryOptions();
 
 function updateClock() {
@@ -132,7 +160,8 @@ async function updateCountdown() {
 function showToast(msg, duration) {
   const t = document.createElement('div');
   t.className = 'toast';
-  t.innerHTML = '<img src="/static/icons/info.svg" class="icon"> ' + msg;
+  t.innerHTML = '<img src="/static/icons/info.svg" class="icon"> ';
+  t.appendChild(document.createTextNode(String(msg)));
   if (duration > 5000) {
     t.title = 'Click to dismiss';
     t.onclick = () => t.remove();
@@ -142,24 +171,30 @@ function showToast(msg, duration) {
 }
 
 // ── Notifications ────────────────────────────────────────
+function browserNotificationsAvailable() {
+  return 'Notification' in window;
+}
+
 function requestNotifyPermission() {
-  if (Notification.permission === 'default') {
+  if (browserNotificationsAvailable() && Notification.permission === 'default') {
     Notification.requestPermission();
   }
 }
-// Aggressively request permission — try on first click too
-document.addEventListener('click', function ask() {
-  if (Notification.permission === 'default') Notification.requestPermission();
-  if (Notification.permission !== 'default') document.removeEventListener('click', ask);
-}, {once: false});
-requestNotifyPermission();
+// Browser mode still needs permission; the desktop shell uses native notifications.
+if (!IS_DESKTOP && browserNotificationsAvailable()) {
+  requestNotifyPermission();
+  document.addEventListener('click', function ask() {
+    requestNotifyPermission();
+    if (Notification.permission !== 'default') document.removeEventListener('click', ask);
+  });
+}
 
-function fireReminder(title, body, eventId) {
+function fireReminder(title, body, eventId, nativeNotified) {
   playBeep();
-  // OS desktop notification
-  if (Notification.permission === 'granted') {
+  // Fall back to the browser API only if native Python delivery failed.
+  if (!nativeNotified && browserNotificationsAvailable() && Notification.permission === 'granted') {
     new Notification(title, {
-      body: body, icon: '/favicon.ico', requireInteraction: true, tag: 'reminder',
+      body: body, icon: '/static/app-icon.png' + ASSET_QUERY, requireInteraction: true, tag: 'reminder',
     });
   }
   // Bottom-right popup with ✕ and quick-snooze
@@ -172,7 +207,7 @@ function fireReminder(title, body, eventId) {
     ? '<div style="display:flex;gap:6px;margin-top:10px;">'
       + ['2m','5m','15m'].map(function(m) {
           var mins = parseInt(m);
-          return '<button onclick="fetch(\'/api/events/' + eventId + '/snooze?minutes=' + mins + '\',{method:\'POST\'});'
+          return '<button onclick="api(\'POST\',\'/api/events/' + eventId + '/snooze?minutes=' + mins + '\');'
             + 'let p=this.parentElement.parentElement.parentElement.parentElement;p.remove();'
             + 'showToast(\'Snoozed for ' + mins + ' minutes\',3000);" '
             + 'style="background:var(--warning);color:#fff;border:none;padding:5px 12px;'
@@ -198,10 +233,16 @@ function fireReminder(title, body, eventId) {
 
 // ── API helpers ──────────────────────────────────────────
 async function api(method, path, data) {
-  const opts = { method, headers: {'Content-Type':'application/json'} };
-  if (data) opts.body = JSON.stringify(data);
+  // SECURITY: All frontend API requests pass through this token-bearing helper.
+  const opts = { method, headers: {'X-TapTap-Token': API_TOKEN} };
+  if (data !== undefined) {
+    opts.headers['Content-Type'] = 'application/json';
+    opts.body = JSON.stringify(data);
+  }
   const res = await fetch(path, opts);
-  return res.json();
+  const payload = await res.json();
+  if (!res.ok) throw new Error(payload.error || ('Request failed: ' + res.status));
+  return payload;
 }
 
 // ── Load events ──────────────────────────────────────────
@@ -219,23 +260,21 @@ async function loadEvents() {
   list.innerHTML = events.map(ev => {
     const dt = new Date(ev.event_date + 'T' + ev.event_time);
     const isPast = dt < now;
-    const recur = ev.recurrence;
-    const recDisplay = recur === 'none' ? '' : ['daily','weekly','monthly','yearly'].includes(recur)
-      ? recur : recur.replace(':', ' every ') + 's'.replace('ss','s');
+    const recDisplay = recurrenceLabel(ev.recurrence, '');
     const recLabel = recDisplay
-      ? `<span class="event-tag tag-recur">${recDisplay}</span>` : '';
-    const remindLabel = `<span class="event-tag tag-reminder"><img src="/static/icons/clock-white.svg" class="icon" style="width:12px;height:12px;"> ${ev.reminder_min}m</span>`;
+      ? `<span class="event-tag tag-recur">${esc(recDisplay)}</span>` : '';
+    const remindLabel = `<span class="event-tag tag-reminder"><img src="/static/icons/clock-white.svg" class="icon" style="width:12px;height:12px;"> ${esc(ev.reminder_min)}m</span>`;
     const knownCats = ['work','personal','health','other'];
     const catCSS = knownCats.includes(ev.category) ? ev.category : (ev.category ? 'custom' : '');
     const catClass = catCSS ? ` cat-${catCSS}` : '';
     const catDot = catCSS
-      ? `<span class="cat-dot cat-dot-${catCSS}" title="${ev.category}"></span>` : '';
+      ? `<span class="cat-dot cat-dot-${catCSS}" title="${esc(ev.category)}"></span>` : '';
     return `<div class="event-card${isPast ? ' past' : ''}${catClass}">
       <div class="event-icon"><img src="/static/icons/${isPast ? 'check-white' : 'bell'}.svg" style="width:22px;height:22px;"></div>
       <div class="event-info">
         <div class="event-name">${esc(ev.name)}${catDot}${recLabel}${remindLabel}</div>
         <div class="event-meta">
-          <img src="/static/icons/calendar.svg" class="icon" style="width:12px;height:12px;"> ${ev.event_date} at ${ev.event_time}
+          <img src="/static/icons/calendar.svg" class="icon" style="width:12px;height:12px;"> ${esc(ev.event_date)} at ${esc(ev.event_time)}
           ${ev.description ? ' — ' + esc(ev.description) : ''}
         </div>
       </div>
@@ -260,8 +299,9 @@ async function loadEvents() {
   }
 
 function esc(s) {
+  // SECURITY: Escape every database-derived value before using HTML templates.
   const el = document.createElement('span');
-  el.textContent = s;
+  el.textContent = s == null ? '' : String(s);
   return el.innerHTML;
 }
 
@@ -324,7 +364,7 @@ function startEdit(id) {
     document.getElementById('ev-desc').value = ev.description || '';
     document.getElementById('ev-reminder').value = ev.reminder_min;
     // Handle custom recurrence like "3:days" or standard like "weekly"
-    const rec = ev.recurrence;
+    const rec = String(ev.recurrence || 'none');
     if (['none','daily','weekly','monthly','yearly'].includes(rec)) {
       document.getElementById('ev-recurrence').value = rec;
       document.getElementById('custom-recur').style.display = 'none';
@@ -345,6 +385,7 @@ function startEdit(id) {
       document.getElementById('custom-cat-name').value = cat;
       document.getElementById('custom-cat').style.display = 'block';
     }
+    updateCategoryIcon();
     document.getElementById('form-title').innerHTML = '<img src="/static/icons/edit.svg" class="icon"> Edit Event';
     document.getElementById('btn-save').innerHTML = '<img src="/static/icons/edit.svg" class="icon"> Save Changes';
     document.getElementById('btn-cancel').style.display = '';
@@ -360,6 +401,24 @@ function toggleCustomRecur() {
 function toggleCustomCat() {
   const val = document.getElementById('ev-category').value;
   document.getElementById('custom-cat').style.display = val === 'custom' ? 'block' : 'none';
+  updateCategoryIcon();
+}
+
+function updateCategoryIcon() {
+  const select = document.getElementById('ev-category');
+  const icon = select.parentElement.querySelector('.category-select-icon');
+  if (!icon) return;
+  // PACKAGING: Every filename here must exist under static/icons and in asset tests.
+  const iconFiles = {
+    work: 'briefcase.svg',
+    personal: 'user.svg',
+    health: 'heart.svg',
+    other: 'tag.svg',
+    custom: 'star.svg'
+  };
+  icon.src = '/static/icons/'
+    + (iconFiles[select.value] || (select.value ? 'star.svg' : 'circle-outline.svg'))
+    + ASSET_QUERY;
 }
 
 async function refreshCategoryOptions() {
@@ -384,7 +443,7 @@ async function refreshCategoryOptions() {
     for (const cat of custom) {
       const opt = document.createElement('option');
       opt.value = cat;
-      opt.textContent = '✨ ' + cat;
+      opt.textContent = cat;
       sel.appendChild(opt);
     }
     // Restore selection
@@ -395,13 +454,14 @@ async function refreshCategoryOptions() {
     } else {
       sel.value = currentVal;
     }
+    updateCategoryIcon();
   } catch(e) { /* ignore */ }
 }
 function cancelEdit() {
   document.getElementById('edit-id').value = '';
   document.getElementById('ev-name').value = '';
   const now = calibratedNow();
-  document.getElementById('ev-date').value = now.toISOString().slice(0,10);
+  document.getElementById('ev-date').value = localDateValue(now);
   document.getElementById('ev-time').value =
     String(now.getHours()).padStart(2,'0') + ':' +
     String(now.getMinutes()).padStart(2,'0');
@@ -412,6 +472,7 @@ function cancelEdit() {
   document.getElementById('custom-cat-name').value = '';
   document.getElementById('custom-cat').style.display = 'none';
   document.getElementById('custom-recur').style.display = 'none';
+  updateCategoryIcon();
   document.getElementById('form-title').innerHTML = '<img src="/static/icons/plus.svg" class="icon"> Add New Event';
   document.getElementById('btn-save').innerHTML = '<img src="/static/icons/plus-white.svg" class="icon"> Add Event';
   document.getElementById('btn-cancel').style.display = 'none';
@@ -427,7 +488,7 @@ async function deleteEvent(id) {
   const toast = document.createElement('div');
   toast.className = 'toast undo-toast';
   toast.innerHTML = 'Deleted. <button onclick="'
-    + "fetch('/api/events/" + id + "/restore',{method:'POST'}).then(()=>{showToast('Restored!');loadEvents();});"
+    + "api('POST','/api/events/" + id + "/restore').then(()=>{showToast('Restored!');loadEvents();});"
     + "this.parentElement.remove();"
     + '" style="background:var(--success);color:#fff;border:none;padding:4px 14px;border-radius:4px;cursor:pointer;font-weight:600;margin-left:8px;">Undo</button>';
   let undoTimer = setTimeout(() => { if (toast.parentNode) toast.remove(); }, 3000);
@@ -451,8 +512,7 @@ async function snoozeEvent(id, minutes) {
 async function pollReminders() {
   if (!_pollActive) return;  // tab hidden — skip
   try {
-    const res = await fetch('/api/pending');
-    const data = await res.json();
+    const data = await api('GET', '/api/pending');
     const status = document.getElementById('status');
     status.innerHTML = '<span class="dot"></span> ' + data.status;
     // Feed countdown from the same response (no separate fetch)
@@ -460,7 +520,7 @@ async function pollReminders() {
     cd._nextAt = data.next_at || null;
     updateCountdown();
     if (data.reminders && data.reminders.length) {
-      data.reminders.forEach(r => fireReminder(r.title, r.message, r.id));
+      data.reminders.forEach(r => fireReminder(r.title, r.message, r.id, r.native_notified === true));
     }
   } catch(e) {
     // server not ready yet — ignore

@@ -2,12 +2,17 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<!-- SECURITY: The API token is process-local and dynamic responses are not cached. -->
+<meta name="taptap-api-token" content="{{ api_token }}">
+<meta name="taptap-desktop" content="{{ '1' if desktop_mode else '0' }}">
+<meta name="taptap-asset-version" content="{{ asset_version }}">
 <title>TapTap</title>
-<link rel="icon" type="image/svg+xml" href="/favicon.ico?v=2">
+<link rel="icon" type="image/svg+xml" href="/static/app-icon.svg?v={{ asset_version }}">
 
-  <link rel="stylesheet" href="/static/style.css">
-  <script src="/static/app.js" defer></script>
-  <script src="/static/history.js" defer></script>
+  <link rel="stylesheet" href="/static/style.css?v={{ asset_version }}">
+  <!-- INVARIANT: history.js depends on globals declared by app.js; keep this order. -->
+  <script src="/static/app.js?v={{ asset_version }}" defer></script>
+  <script src="/static/history.js?v={{ asset_version }}" defer></script>
 </head>
 <body>
 
@@ -50,14 +55,17 @@
       </div>
       <div>
         <label>Category</label>
-        <select id="ev-category" onchange="toggleCustomCat()">
-          <option value="">None</option>
-          <option value="work">💼 Work</option>
-          <option value="personal">🌿 Personal</option>
-          <option value="health">❤️ Health</option>
-          <option value="other">📌 Other</option>
-          <option value="custom">✨ Custom…</option>
-        </select>
+        <div class="category-select-wrap">
+          <img class="category-select-icon" src="/static/icons/circle-outline.svg?v={{ asset_version }}" alt="" aria-hidden="true">
+          <select id="ev-category" onchange="toggleCustomCat()">
+            <option value="">None</option>
+            <option value="work">Work</option>
+            <option value="personal">Personal</option>
+            <option value="health">Health</option>
+            <option value="other">Other</option>
+            <option value="custom">Custom…</option>
+          </select>
+        </div>
       </div>
       <div id="custom-cat" style="display:none;">
         <label>Custom Category Name</label>

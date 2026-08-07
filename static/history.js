@@ -1,3 +1,4 @@
+// INVARIANT: index.html loads app.js first; this file intentionally reuses its helpers.
 // ── History ─────────────────────────────────────────────
 let _historyOpen = false;
 
@@ -12,17 +13,20 @@ async function _renderHistory() {
   }
   actions.style.display = 'flex';
   list.innerHTML = events.map(ev => {
-    const recur = ev.recurrence;
-    const recDisplay = recur === 'none' ? 'once' :
-      ['daily','weekly','monthly','yearly'].includes(recur) ? recur :
-      recur.replace(':', ' every ') + 's'.replace('ss','s');
+    const recDisplay = recurrenceLabel(ev.recurrence, 'once');
+    const category = String(ev.category || '');
+    const knownCats = ['work','personal','health','other'];
+    const categoryDot = category
+      ? '<span class=\"cat-dot cat-dot-' + (knownCats.includes(category) ? category : 'custom')
+        + '\" title=\"' + esc(category) + '\"></span>'
+      : '';
     return '<div class=\"event-card\" style=\"opacity:0.7;\">'
       + '<input type=\"checkbox\" class=\"hist-cb\" value=\"' + ev.id + '\" onchange=\"updateSelected()\" style=\"display:none;width:auto;flex-shrink:0;\">'
       + '<div class=\"event-info\">'
-      + '<div class=\"event-name\">' + esc(ev.name) + (function(c){var k=['work','personal','health','other'];return c?(k.includes(c)?'<span class=\"cat-dot cat-dot-'+c+'\" title=\"'+c+'\"></span>':'<span class=\"cat-dot cat-dot-custom\" title=\"'+c+'\"></span>'):'';})(ev.category) + '</div>'
+      + '<div class=\"event-name\">' + esc(ev.name) + categoryDot + '</div>'
       + '<div class=\"event-meta\"><img src=\"/static/icons/calendar.svg\" class=\"icon\" style=\"width:12px;height:12px;\"> '
-      + ev.event_date + ' at ' + ev.event_time
-      + ' · <img src=\"/static/icons/clock.svg\" class=\"icon\" style=\"width:12px;height:12px;\"> ' + ev.reminder_min + 'm · ' + recDisplay
+      + esc(ev.event_date) + ' at ' + esc(ev.event_time)
+      + ' · <img src=\"/static/icons/clock.svg\" class=\"icon\" style=\"width:12px;height:12px;\"> ' + esc(ev.reminder_min) + 'm · ' + esc(recDisplay)
       + '</div></div>'
       + '<button class=\"btn btn-danger btn-sm\" onclick=\"deleteOneHist(' + ev.id + ')\" title=\"Delete permanently\">'
       + '<img src=\"/static/icons/trash-white.svg\" class=\"icon\"></button>'
@@ -30,6 +34,10 @@ async function _renderHistory() {
       + '<img src=\"/static/icons/plus-white.svg\" class=\"icon\"> Reuse</button>'
       + '</div>';
   }).join('');
+  // INVARIANT (UX): A selection-mode refresh must not hide new checkboxes.
+  if (_selectMode) {
+    document.querySelectorAll('.hist-cb').forEach(cb => { cb.style.display = ''; });
+  }
   updateSelected();
 }
 
@@ -105,13 +113,15 @@ async function reuseEvent(id) {
   const events = await api('GET', '/api/history');
   const ev = events.find(e => e.id === id);
   if (!ev) return;
+  // INVARIANT: Reuse creates a new event and must never retain a previous edit ID.
+  cancelEdit();
   document.getElementById('ev-name').value = ev.name;
   document.getElementById('ev-desc').value = ev.description || '';
-  document.getElementById('ev-date').value = new Date().toISOString().slice(0, 10);
+  document.getElementById('ev-date').value = localDateValue(calibratedNow());
   document.getElementById('ev-time').value = ev.event_time;
   document.getElementById('ev-reminder').value = ev.reminder_min;
   // Handle custom recurrence like "3:days" or standard like "weekly"
-  const rec = ev.recurrence;
+  const rec = String(ev.recurrence || 'none');
   if (['none','daily','weekly','monthly','yearly'].includes(rec)) {
     document.getElementById('ev-recurrence').value = rec;
     document.getElementById('custom-recur').style.display = 'none';
@@ -135,6 +145,7 @@ async function reuseEvent(id) {
     document.getElementById('ev-category').value = '';
     document.getElementById('custom-cat').style.display = 'none';
   }
+  updateCategoryIcon();
   document.getElementById('ev-name').focus();
   window.scrollTo({top:0, behavior:'smooth'});
   showToast('Template loaded from history — edit and save.');

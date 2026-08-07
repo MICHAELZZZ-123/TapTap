@@ -2,6 +2,68 @@
 
 All notable changes to TapTap will be documented in this file.
 
+## [0.2.1] — 2026-08-07
+
+Maintenance release focused on complete packaged assets, safer upgrades, and
+clearer repository ownership without changing TapTap's original feature set.
+
+### Added
+- Category-specific selector icons for Work, Personal, Health, Other, and
+  custom categories, plus a neutral default icon.
+- `FILE_NOTES.md` and tagged inline maintenance notes for security,
+  compatibility, invariants, robustness, and packaging boundaries.
+
+### Changed
+- Frontend assets now use a renewed cache version, and the PyInstaller spec
+  collects the complete `templates/` and `static/` trees.
+- Windows and macOS release metadata now identify the application as version
+  0.2.1.
+
+### Fixed
+- Fresh builds now contain all six category SVGs instead of relying on files
+  added after an earlier executable was produced.
+- Form defaults and reused history templates use the local calendar date rather
+  than combining a UTC date with local time.
+- Custom recurrence labels render naturally, such as `every 2 weeks`.
+- Reusing a history item always creates a new event and cannot overwrite an
+  event that was already being edited.
+- History checkboxes remain visible when selection mode refreshes the panel.
+- Runtime services initialize after argument parsing and within guarded startup,
+  so help output and useful errors do not depend on SQLite being available.
+- Linux one-file builds include the NSS, XKB, and XCB libraries required by Qt
+  WebEngine.
+
+## [0.2.0] — 2026-08-07
+
+### Added
+- Native pywebview application window with persistent local webview state.
+- One-second Python reminder worker that continues while the window is minimized.
+- Cross-platform native notifications with an in-window/browser fallback.
+- Single-instance locking, rotating application logs, application artwork, and
+  Windows executable version metadata.
+- Per-launch authentication token for every internal API request.
+- Automated API/UI compatibility, database, and reminder lifecycle tests, plus
+  an icon generation script.
+
+### Changed
+- `/api/pending` is now read-only; reminder state changes happen in the worker.
+- PyInstaller builds hide the console, bundle complete asset directories, and
+  include the platform webview and notification dependencies.
+- Snoozing a just-completed event reactivates it so quick snooze remains useful.
+- Linux launcher now opens the native application directly.
+
+### Fixed
+- Reminders no longer depend on a visible browser tab polling the server.
+- Legacy `last_reminded` timestamps no longer cause old reminders to fire again.
+- A fixed port is no longer required for the packaged desktop application.
+- Editing an event's schedule now clears stale reminder and snooze state.
+- Long-overdue recurring events advance directly to their next future occurrence
+  instead of emitting a notification storm while catching up.
+- Duplicate reminder offsets fire once, native notification calls have a timeout,
+  and SQLite waits safely for short-lived concurrent writes.
+- Versioned frontend assets and non-cacheable API tokens prevent stale webview
+  code after an upgrade; dynamic event labels are HTML-escaped.
+
 ## [0.1.1] — 2026-07-28
 
 ### Added

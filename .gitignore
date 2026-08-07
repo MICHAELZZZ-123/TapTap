@@ -1,14 +1,100 @@
-# IDE / editor
+# Local editors and coding agents
+.agents/
 .claude/
+.codex/
+.fleet/
+.idea/
 .vscode/
+.history/
+*.swp
+*.swo
+*~
+.#*
 
-# Python
+# Python bytecode and native extension output
 __pycache__/
 *.py[cod]
-*.egg-info/
-dist/
-build/
+*.pyd
+*$py.class
 
-# OS
+# Python environments and installed-package metadata
+.venv/
+venv/
+env/
+ENV/
+.eggs/
+*.egg
+*.egg-info/
+pip-wheel-metadata/
+/wheels/
+
+# Test, coverage, type-checker, and linter caches
+.coverage
+.coverage.*
+.hypothesis/
+.mypy_cache/
+.nox/
+.pyre/
+.pytest_cache/
+.pytype/
+.ruff_cache/
+.tox/
+coverage.xml
+htmlcov/
+junit.xml
+*.cover
+*.prof
+
+# PyInstaller and distributable application output
+/build/
+/dist/
+/.pyinstaller/
+/TapTap
+/TapTap.exe
+/TapTap.app/
+*.AppImage
+*.deb
+*.dmg
+*.msi
+*.rpm
+*.whl
+
+# TapTap runtime state
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.log
+*.pid
+/TapTap.lock
+
+# Local configuration, secrets, and signing credentials
+.env
+.env.*
+!.env.example
+*.key
+*.p12
+*.pfx
+
+# Temporary, backup, and crash files
+*.bak
+*.dmp
+*.orig
+*.rej
+*.stackdump
+*.temp
+*.tmp
+/core
+/core.*
+
+# Operating-system metadata
 .DS_Store
+._*
+.Spotlight-V100/
+.Trashes/
+$RECYCLE.BIN/
+Desktop.ini
 Thumbs.db
+ehthumbs.db
