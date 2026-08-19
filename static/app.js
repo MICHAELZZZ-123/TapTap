@@ -4,19 +4,314 @@ const IS_DESKTOP = document.querySelector('meta[name="taptap-desktop"]').content
 // INVARIANT (cache): This query must follow app.py's _ASSET_VERSION.
 const ASSET_VERSION = document.querySelector('meta[name="taptap-asset-version"]').content;
 const ASSET_QUERY = '?v=' + encodeURIComponent(ASSET_VERSION);
+// PACKAGING: Every filename here must exist under static/icons and in asset tests.
+const CATEGORY_ICON_FILES = Object.freeze({
+  work: 'briefcase.svg',
+  personal: 'user.svg',
+  health: 'heart.svg',
+  other: 'tag.svg',
+  custom: 'star.svg'
+});
 
 // ── Keyboard shortcuts ───────────────────────────────────
-document.addEventListener('keydown', function(e) {
-  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      saveEvent();
-    } else if (e.key === 'Escape') {
-      e.preventDefault();
-      cancelEdit();
+const SHORTCUT_PLATFORM = (
+  (navigator.userAgentData && navigator.userAgentData.platform)
+  || navigator.platform
+  || ''
+);
+const SHORTCUT_IS_MAC = /Mac|iPhone|iPad|iPod/i.test(SHORTCUT_PLATFORM);
+const PRIMARY_SHORTCUT_LABEL = SHORTCUT_IS_MAC ? 'Cmd' : 'Ctrl';
+const ALT_SHORTCUT_LABEL = SHORTCUT_IS_MAC ? 'Option' : 'Alt';
+const FORM_FIELD_IDS = Object.freeze([
+  'ev-name', 'ev-desc', 'ev-date', 'ev-time', 'ev-category',
+  'custom-cat-name', 'ev-reminder', 'ev-recurrence', 'custom-n', 'custom-unit'
+]);
+
+let _formBaseline = null;
+let _shortcutReturnFocus = null;
+let _undoState = null;
+
+function isEditableTarget(target) {
+  if (!target || typeof target.closest !== 'function') return false;
+  return Boolean(target.closest(
+    'input, textarea, select, [contenteditable=""], [contenteditable="true"]'
+  ));
+}
+
+function choiceMenuIsOpen() {
+  const categoryButton = document.getElementById('category-select-button');
+  return Boolean(
+    (categoryButton && categoryButton.getAttribute('aria-expanded') === 'true')
+    || document.querySelector('.personalized-select-wrap.is-open')
+  );
+}
+
+function closeOpenChoiceMenus(returnFocus = false) {
+  const categoryButton = document.getElementById('category-select-button');
+  if (categoryButton && categoryButton.getAttribute('aria-expanded') === 'true') {
+    closeCategoryDropdown(returnFocus);
+  }
+  document.querySelectorAll('.personalized-select-wrap.is-open').forEach(wrap => {
+    closePersonalizedSelect(wrap, returnFocus);
+  });
+}
+
+function isPrimaryShortcut(event, key) {
+  const primaryPressed = SHORTCUT_IS_MAC ? event.metaKey : event.ctrlKey;
+  const otherPrimaryPressed = SHORTCUT_IS_MAC ? event.ctrlKey : event.metaKey;
+  return primaryPressed
+    && !otherPrimaryPressed
+    && !event.altKey
+    && !event.shiftKey
+    && event.key.toLowerCase() === key;
+}
+
+function isKnownAppShortcut(event) {
+  return ['n', 's', 'r', 'z'].some(key => isPrimaryShortcut(event, key))
+    || (
+      event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey
+      && event.key.toLowerCase() === 'p'
+    );
+}
+
+function isShortcutHintKey(event) {
+  return event.shiftKey
+    && !event.ctrlKey
+    && !event.metaKey
+    && !event.altKey
+    && (event.key === '?' || event.code === 'Slash');
+}
+
+function shortcutDialogIsOpen() {
+  const dialog = document.getElementById('shortcuts-dialog');
+  return Boolean(dialog && !dialog.hidden);
+}
+
+function updateShortcutLabels() {
+  document.querySelectorAll('[data-primary-key]').forEach(element => {
+    element.textContent = PRIMARY_SHORTCUT_LABEL + '+' + element.dataset.primaryKey;
+  });
+  document.querySelectorAll('[data-alt-key]').forEach(element => {
+    element.textContent = ALT_SHORTCUT_LABEL + '+' + element.dataset.altKey;
+  });
+  document.querySelectorAll('[data-shortcut-title]').forEach(element => {
+    element.title = element.dataset.shortcutTitle
+      .replaceAll('{primary}', PRIMARY_SHORTCUT_LABEL)
+      .replaceAll('{alt}', ALT_SHORTCUT_LABEL);
+  });
+}
+
+function shortcutDialogFocusableElements() {
+  const dialog = document.getElementById('shortcuts-dialog');
+  if (!dialog) return [];
+  return Array.from(dialog.querySelectorAll(
+    'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), '
+      + 'textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+  ));
+}
+
+function trapShortcutDialogFocus(event) {
+  const dialog = document.getElementById('shortcuts-dialog');
+  const focusable = shortcutDialogFocusableElements();
+  if (!dialog || !focusable.length) {
+    event.preventDefault();
+    return;
+  }
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (event.shiftKey && (document.activeElement === first || !dialog.contains(document.activeElement))) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && (document.activeElement === last || !dialog.contains(document.activeElement))) {
+    event.preventDefault();
+    first.focus();
+  }
+}
+
+function openShortcuts() {
+  const dialog = document.getElementById('shortcuts-dialog');
+  const button = document.getElementById('shortcuts-button');
+  const closeButton = document.getElementById('shortcuts-close');
+  if (!dialog || !dialog.hidden) return;
+
+  _shortcutReturnFocus = document.activeElement;
+  if (_shortcutReturnFocus && typeof _shortcutReturnFocus.closest === 'function') {
+    const categoryWrap = _shortcutReturnFocus.closest('.category-select-wrap');
+    const personalizedWrap = _shortcutReturnFocus.closest('.personalized-select-wrap');
+    if (categoryWrap) {
+      _shortcutReturnFocus = categoryWrap.querySelector('.category-select-button');
+    } else if (personalizedWrap) {
+      _shortcutReturnFocus = personalizedWrap.querySelector('.personalized-select-button');
     }
   }
-});
+  closeOpenChoiceMenus(false);
+  dialog.hidden = false;
+  document.body.classList.add('shortcuts-open');
+  if (button) button.setAttribute('aria-expanded', 'true');
+  if (closeButton) closeButton.focus();
+}
+
+function closeShortcuts(restoreFocus = true) {
+  const dialog = document.getElementById('shortcuts-dialog');
+  const button = document.getElementById('shortcuts-button');
+  if (!dialog || dialog.hidden) return;
+
+  dialog.hidden = true;
+  document.body.classList.remove('shortcuts-open');
+  if (button) button.setAttribute('aria-expanded', 'false');
+  if (
+    restoreFocus
+    && _shortcutReturnFocus
+    && document.documentElement.contains(_shortcutReturnFocus)
+    && typeof _shortcutReturnFocus.focus === 'function'
+  ) {
+    _shortcutReturnFocus.focus();
+  }
+  _shortcutReturnFocus = null;
+}
+
+function toggleShortcuts() {
+  if (shortcutDialogIsOpen()) closeShortcuts();
+  else openShortcuts();
+}
+
+function initShortcutUI() {
+  const dialog = document.getElementById('shortcuts-dialog');
+  const openButton = document.getElementById('shortcuts-button');
+  const closeButton = document.getElementById('shortcuts-close');
+  updateShortcutLabels();
+  if (!dialog || !openButton || !closeButton) return;
+
+  openButton.addEventListener('click', openShortcuts);
+  closeButton.addEventListener('click', () => closeShortcuts());
+  dialog.addEventListener('click', event => {
+    if (event.target === dialog) closeShortcuts();
+  });
+}
+
+function formSnapshot() {
+  const values = Object.fromEntries(FORM_FIELD_IDS.map(id => {
+    const field = document.getElementById(id);
+    return [id, field ? field.value : ''];
+  }));
+  if (values['ev-category'] !== 'custom') values['custom-cat-name'] = '';
+  if (values['ev-recurrence'] !== 'custom') {
+    values['custom-n'] = '';
+    values['custom-unit'] = '';
+  }
+  return JSON.stringify(values);
+}
+
+function rememberFormBaseline() {
+  _formBaseline = formSnapshot();
+}
+
+function formHasUnsavedChanges() {
+  return _formBaseline !== null && formSnapshot() !== _formBaseline;
+}
+
+function formIsActive() {
+  return Boolean(document.getElementById('edit-id').value) || formHasUnsavedChanges();
+}
+
+function confirmDiscardFormChanges() {
+  return !formHasUnsavedChanges() || confirm('Discard unsaved changes?');
+}
+
+function startNewEvent() {
+  if (!confirmDiscardFormChanges()) return;
+  cancelEdit();
+  document.getElementById('ev-name').focus();
+  window.scrollTo({top: 0, behavior: 'smooth'});
+}
+
+function cancelFormFromShortcut() {
+  if (!formIsActive()) return false;
+  if (!confirmDiscardFormChanges()) return true;
+  cancelEdit();
+  return true;
+}
+
+async function refreshEventData(announce = true) {
+  try {
+    const refreshes = [loadEvents(), refreshCategoryOptions()];
+    if (typeof _historyOpen !== 'undefined' && _historyOpen) {
+      refreshes.push(_renderHistory());
+    }
+    await Promise.all(refreshes);
+    if (announce) showToast('Refreshed', 2000);
+  } catch(e) {
+    if (announce) showToast('Could not refresh event data.');
+  }
+}
+
+function handleAppShortcut(event) {
+  if (event.defaultPrevented || event.isComposing) return;
+
+  if (isShortcutHintKey(event) && !isEditableTarget(event.target)) {
+    event.preventDefault();
+    if (!event.repeat) toggleShortcuts();
+    return;
+  }
+
+  if (shortcutDialogIsOpen()) {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      if (!event.repeat) closeShortcuts();
+    } else if (event.key === 'Tab') {
+      trapShortcutDialogFocus(event);
+    } else if (isKnownAppShortcut(event)) {
+      event.preventDefault();
+    }
+    return;
+  }
+
+  if (event.key === 'Escape') {
+    if (choiceMenuIsOpen()) {
+      event.preventDefault();
+      if (!event.repeat) closeOpenChoiceMenus(true);
+    } else if (formIsActive()) {
+      event.preventDefault();
+      if (!event.repeat) cancelFormFromShortcut();
+    }
+    return;
+  }
+
+  if (isPrimaryShortcut(event, 'n')) {
+    event.preventDefault();
+    if (!event.repeat) startNewEvent();
+    return;
+  }
+  if (isPrimaryShortcut(event, 's')) {
+    event.preventDefault();
+    if (!event.repeat) saveEvent();
+    return;
+  }
+  if (isPrimaryShortcut(event, 'r')) {
+    event.preventDefault();
+    if (!event.repeat) refreshEventData();
+    return;
+  }
+  if (
+    event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey
+    && event.key.toLowerCase() === 'p'
+    && !isEditableTarget(event.target)
+  ) {
+    event.preventDefault();
+    if (!event.repeat) toggleHistory();
+    return;
+  }
+  if (
+    isPrimaryShortcut(event, 'z')
+    && !isEditableTarget(event.target)
+    && _undoState
+  ) {
+    event.preventDefault();
+    if (!event.repeat) undoLatestDeletion();
+  }
+}
+
+document.addEventListener('keydown', handleAppShortcut);
 
 // ── Init ─────────────────────────────────────────────────
 
@@ -32,6 +327,71 @@ function setMode(mode) {
   document.getElementById('mode-light').classList.toggle('active', mode === 'light');
   document.getElementById('mode-dark').classList.toggle('active', mode === 'dark');
   localStorage.setItem('reminder-mode', mode);
+}
+
+// ── Windows sign-in startup ──────────────────────────────
+let _autostartUpdateInFlight = false;
+
+async function loadAutostartSetting(announce = false) {
+  const control = document.getElementById('autostart-control');
+  const toggle = document.getElementById('autostart-toggle');
+  const liveStatus = document.getElementById('autostart-status');
+  if (!control || !toggle || !IS_DESKTOP) return;
+
+  try {
+    const status = await api('GET', '/api/settings/autostart');
+    if (!status.supported) {
+      control.hidden = true;
+      return;
+    }
+    control.hidden = false;
+    toggle.checked = status.enabled === true;
+    toggle.dataset.enabled = toggle.checked ? 'true' : 'false';
+    if (liveStatus) {
+      liveStatus.textContent = toggle.checked
+        ? 'Start with Windows is enabled.'
+        : 'Start with Windows is disabled.';
+    }
+    if (announce) showToast(liveStatus.textContent);
+  } catch (error) {
+    if (liveStatus) liveStatus.textContent = 'Could not read Windows startup settings.';
+    control.title = String(error.message || error);
+  }
+}
+
+async function setAutostartSetting() {
+  const toggle = document.getElementById('autostart-toggle');
+  const liveStatus = document.getElementById('autostart-status');
+  if (!toggle || _autostartUpdateInFlight) return;
+
+  const requested = toggle.checked;
+  const previous = toggle.dataset.enabled === 'true';
+  _autostartUpdateInFlight = true;
+  toggle.disabled = true;
+  try {
+    const status = await api('PUT', '/api/settings/autostart', {enabled: requested});
+    toggle.checked = status.enabled === true;
+    toggle.dataset.enabled = toggle.checked ? 'true' : 'false';
+    const message = toggle.checked
+      ? 'TapTap will start in the background when you sign in.'
+      : 'Start with Windows disabled.';
+    if (liveStatus) liveStatus.textContent = message;
+    showToast(message, 4500);
+  } catch (error) {
+    toggle.checked = previous;
+    if (liveStatus) liveStatus.textContent = 'Could not change Windows startup settings.';
+    showToast(String(error.message || error), 6500);
+  } finally {
+    toggle.disabled = false;
+    _autostartUpdateInFlight = false;
+  }
+}
+
+function initAutostartUI() {
+  const toggle = document.getElementById('autostart-toggle');
+  if (!toggle) return;
+  toggle.addEventListener('change', setAutostartSetting);
+  loadAutostartSetting();
 }
 
 // ── Sound alert ───────────────────────────────────────────
@@ -52,21 +412,35 @@ function playBeep() {
 }
 
 // Clock calibration — offset between server time and local time (in ms)
+const CLOCK_MS = 1000;                  // visibly tick once per second
+const CLOCK_CALIBRATION_MS = 5 * 60_000;
+const CLOCK_RESUME_GAP_MS = 5000;       // a delayed tick can indicate sleep/wake
 let _clockOffset = 0;
+let _clockCalibration = null;
+let _lastClockTick = Date.now();
+let _clockTimer = null;
 
-async function calibrateClock() {
-  try {
-    const t0 = Date.now();
-    const data = await api('GET', '/api/time');
-    const t1 = Date.now();
-    // Estimate server time at the midpoint of the request round-trip
-    const serverNow = data.timestamp * 1000;
-    const rtt = t1 - t0;
-    const estimatedServerAtT1 = serverNow + rtt / 2;
-    _clockOffset = estimatedServerAtT1 - t1;
-  } catch(e) {
-    // keep current offset on failure
-  }
+function calibrateClock() {
+  // Visibility, focus, and wake signals can arrive together. Share one local
+  // request so restoring the window never creates a burst of calibrations.
+  if (_clockCalibration) return _clockCalibration;
+  _clockCalibration = (async () => {
+    try {
+      const t0 = Date.now();
+      const data = await api('GET', '/api/time');
+      const t1 = Date.now();
+      // Estimate server time at the midpoint of the request round-trip.
+      const serverNow = data.timestamp * 1000;
+      if (!Number.isFinite(serverNow)) return;
+      const rtt = t1 - t0;
+      const estimatedServerAtT1 = serverNow + rtt / 2;
+      _clockOffset = estimatedServerAtT1 - t1;
+    } catch(e) {
+      // Keep the current offset on failure; the local clock can still tick.
+    }
+  })();
+  _clockCalibration.finally(() => { _clockCalibration = null; });
+  return _clockCalibration;
 }
 
 function calibratedNow() {
@@ -94,13 +468,19 @@ function recurrenceLabel(value, noneLabel) {
   return 'every ' + count + ' ' + unit;
 }
 
-calibrateClock();                         // calibrate immediately
-setInterval(calibrateClock, 5 * 60_000);  // recalibrate every 5 minutes
+function recalibrateAndAlignClock() {
+  return calibrateClock().then(() => {
+    updateClock();
+    scheduleClockTick();
+  });
+}
+
+recalibrateAndAlignClock();
+setInterval(recalibrateAndAlignClock, CLOCK_CALIBRATION_MS);
 
 // ── Lightweight polling — adaptive: 5 s normally, 1 s when reminder is imminent ──
 const POLL_SLOW = 5000;      // normal: every 5 s
 const POLL_FAST = 1000;      // imminent: every 1 s (second-accurate firing)
-const CLOCK_MS = 30000;      // clock display every 30 s (was 1 s)
 let _pollActive = true;      // throttled when tab is hidden
 let _pollTimer = null;
 
@@ -115,7 +495,7 @@ function _scheduleNextPoll() {
 }
 
 pollReminders().then(() => _scheduleNextPoll());
-setInterval(updateClock, CLOCK_MS);
+scheduleClockTick();
 setInterval(updateCountdown, 1000);  // countdown ticks every second (local, no server hit)
 
 // UI polling can pause while hidden because Python delivers reminders in the background.
@@ -123,9 +503,13 @@ document.addEventListener('visibilitychange', () => {
   _pollActive = !document.hidden;
   if (_pollTimer) { clearTimeout(_pollTimer); _pollTimer = null; }
   if (_pollActive) {
+    resumeClock();
     pollReminders().then(() => _scheduleNextPoll());
   }
 });
+window.addEventListener('focus', resumeClock);
+window.addEventListener('pageshow', resumeClock);
+window.addEventListener('focus', () => loadAutostartSetting());
 
 // Set form defaults to current local time (after calibratedNow is defined).
 const _initialNow = calibratedNow();
@@ -136,12 +520,48 @@ document.getElementById('ev-time').value =
 updateClock();
 loadEvents();
 updateCountdown();
-updateCategoryIcon();
+initCategoryDropdown();
+initPersonalizedSelects();
 refreshCategoryOptions();
+initShortcutUI();
+initAutostartUI();
+rememberFormBaseline();
 
 function updateClock() {
   document.getElementById('clock').textContent =
     calibratedNow().toLocaleTimeString();
+}
+
+function millisecondsToNextClockTick(now) {
+  const remainder = ((now % CLOCK_MS) + CLOCK_MS) % CLOCK_MS;
+  return remainder < 1 ? CLOCK_MS : CLOCK_MS - remainder;
+}
+
+function scheduleClockTick() {
+  if (_clockTimer) clearTimeout(_clockTimer);
+  const delay = millisecondsToNextClockTick(calibratedNow().getTime());
+  _clockTimer = setTimeout(() => {
+    _clockTimer = null;
+    tickClock();
+    scheduleClockTick();
+  }, delay);
+}
+
+function tickClock() {
+  const tickAt = Date.now();
+  const resumed = tickAt - _lastClockTick > CLOCK_RESUME_GAP_MS;
+  _lastClockTick = tickAt;
+  updateClock();
+  // A visible page whose timer was delayed likely crossed sleep/wake. Recheck
+  // the server offset, but keep repainting from local time while that completes.
+  if (resumed && !document.hidden) recalibrateAndAlignClock();
+}
+
+function resumeClock() {
+  _lastClockTick = Date.now();
+  updateClock();
+  scheduleClockTick();
+  recalibrateAndAlignClock();
 }
 
 async function updateCountdown() {
@@ -150,10 +570,33 @@ async function updateCountdown() {
   if (!el._nextAt) { el.textContent = ''; return; }
   const seconds = Math.round((new Date(el._nextAt) - calibratedNow()) / 1000);
   if (seconds <= 0) { el.textContent = '· now'; return; }
-  if (seconds < 60) { el.textContent = '· in ' + seconds + 's'; return; }
-  const mins = Math.floor(seconds / 60);
-  el.textContent = mins < 60 ? '· in ' + mins + 'm' :
-    '· in ' + Math.floor(mins/60) + 'h ' + (mins%60) + 'm';
+  el.textContent = formatCountdown(seconds);
+}
+
+function formatCountdown(seconds) {
+  if (seconds < 60) return '· in ' + seconds + 's';
+
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return '· in ' + minutes + 'm';
+
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return '· in ' + hours + 'h ' + (minutes % 60) + 'm';
+
+  const days = Math.floor(hours / 24);
+  if (days < 30) return '· in ' + days + 'd';
+
+  const months = Math.floor(days / 30);
+  if (months < 12) {
+    return '· in ' + months + 'mo' + (days % 30 ? ' ' + (days % 30) + 'd' : '');
+  }
+
+  const years = Math.floor(days / 365);
+  const daysAfterYears = days % 365;
+  const remainingMonths = Math.floor(daysAfterYears / 30);
+  const remainingDays = daysAfterYears % 30;
+  return '· in ' + years + 'y'
+    + (remainingMonths ? ' ' + remainingMonths + 'mo' : '')
+    + (remainingDays ? ' ' + remainingDays + 'd' : '');
 }
 
 // ── Toast ────────────────────────────────────────────────
@@ -281,22 +724,37 @@ async function loadEvents() {
       <div class="event-actions">
         <button class="btn btn-secondary btn-sm" onclick="startEdit(${ev.id})" title="Edit this event"><img src="/static/icons/edit-white.svg" class="icon"></button>
         <div class="snooze-group">
-          <button class="btn btn-warning btn-sm" onclick="var s=this.nextElementSibling;var v=parseInt(s.value==='other'?s.nextElementSibling.value:s.value)||5;snoozeEvent(${ev.id},Math.max(1,Math.min(1440,v)))" title="Snooze reminders"><img src="/static/icons/bell-white.svg" class="icon"></button>
-          <select class="snooze-select" onchange="this.nextElementSibling.style.display=this.value==='other'?'':'none';if(this.value==='other')this.nextElementSibling.focus()">
+          <button class="btn btn-warning btn-sm" onclick="snoozeEventFromControls(${ev.id}, this)" title="Snooze reminders"><img src="/static/icons/bell-white.svg" class="icon"></button>
+          <div class="personalized-select-wrap snooze-select-wrap" data-select-id="snooze-select-${ev.id}">
+            <button type="button" class="personalized-select-button" aria-haspopup="listbox" aria-expanded="false" aria-label="Snooze: 5m">
+              <span class="personalized-select-value">5m</span><span class="personalized-select-chevron" aria-hidden="true"></span>
+            </button>
+            <div class="personalized-select-menu" role="listbox" aria-label="Snooze" hidden></div>
+            <select id="snooze-select-${ev.id}" class="personalized-native-select snooze-select" hidden aria-hidden="true" tabindex="-1">
             <option value="1">1m</option>
             <option value="5" selected>5m</option>
             <option value="10">10m</option>
             <option value="15">15m</option>
             <option value="30">30m</option>
             <option value="other">other…</option>
-          </select>
+            </select>
+          </div>
           <input type="number" class="snooze-custom" value="60" min="1" max="1440" style="display:none">
         </div>
         <button class="btn btn-danger btn-sm" onclick="deleteEvent(${ev.id})" title="Delete this event permanently"><img src="/static/icons/trash-white.svg" class="icon"></button>
       </div>
     </div>`;
   }).join('');
+  initPersonalizedSelects(list);
   }
+
+function snoozeEventFromControls(id, button) {
+  const group = button.closest('.snooze-group');
+  const select = group.querySelector('.snooze-select');
+  const custom = group.querySelector('.snooze-custom');
+  const value = parseInt(select.value === 'other' ? custom.value : select.value, 10) || 5;
+  snoozeEvent(id, Math.max(1, Math.min(1440, value)));
+}
 
 function esc(s) {
   // SECURITY: Escape every database-derived value before using HTML templates.
@@ -386,9 +844,12 @@ function startEdit(id) {
       document.getElementById('custom-cat').style.display = 'block';
     }
     updateCategoryIcon();
+    syncPersonalizedSelectById('ev-recurrence');
+    syncPersonalizedSelectById('custom-unit');
     document.getElementById('form-title').innerHTML = '<img src="/static/icons/edit.svg" class="icon"> Edit Event';
     document.getElementById('btn-save').innerHTML = '<img src="/static/icons/edit.svg" class="icon"> Save Changes';
     document.getElementById('btn-cancel').style.display = '';
+    rememberFormBaseline();
     document.getElementById('ev-name').focus();
     window.scrollTo({top:0, behavior:'smooth'});
   });
@@ -404,21 +865,310 @@ function toggleCustomCat() {
   updateCategoryIcon();
 }
 
+// Native selects remain the value source. These controls give every other
+// choice field the same accessible, app-styled menu as Category.
+function initPersonalizedSelects(root = document) {
+  root.querySelectorAll('.personalized-select-wrap').forEach(wrap => {
+    if (wrap.dataset.initialized === 'true') return;
+    const select = document.getElementById(wrap.dataset.selectId);
+    const button = wrap.querySelector('.personalized-select-button');
+    const menu = wrap.querySelector('.personalized-select-menu');
+    if (!select || !button || !menu) return;
+
+    wrap.dataset.initialized = 'true';
+    rebuildPersonalizedSelect(wrap);
+    button.addEventListener('click', () => togglePersonalizedSelect(wrap));
+    button.addEventListener('keydown', event => {
+      if (['ArrowDown', 'ArrowUp', 'Enter', ' '].includes(event.key)) {
+        event.preventDefault();
+        openPersonalizedSelect(wrap);
+      } else if (
+        event.key === 'Escape'
+        && button.getAttribute('aria-expanded') === 'true'
+      ) {
+        event.preventDefault();
+        closePersonalizedSelect(wrap);
+      }
+    });
+    select.addEventListener('change', () => {
+      syncPersonalizedSelect(wrap);
+      if (select.classList.contains('snooze-select')) {
+        const custom = wrap.parentElement.querySelector('.snooze-custom');
+        custom.style.display = select.value === 'other' ? '' : 'none';
+        if (select.value === 'other') custom.focus();
+      }
+    });
+    document.addEventListener('click', event => {
+      if (!wrap.contains(event.target)) closePersonalizedSelect(wrap, false);
+    });
+  });
+}
+
+function rebuildPersonalizedSelect(wrap) {
+  const select = document.getElementById(wrap.dataset.selectId);
+  const menu = wrap.querySelector('.personalized-select-menu');
+  if (!select || !menu) return;
+  menu.replaceChildren();
+  for (const option of select.options) {
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'personalized-select-option';
+    item.dataset.value = option.value;
+    item.setAttribute('role', 'option');
+    item.tabIndex = -1;
+    item.textContent = option.textContent;
+    item.addEventListener('click', () => {
+      select.value = option.value;
+      select.dispatchEvent(new Event('change', {bubbles: true}));
+      closePersonalizedSelect(wrap);
+    });
+    item.addEventListener('keydown', event => handlePersonalizedOptionKeydown(event, wrap));
+    menu.appendChild(item);
+  }
+  syncPersonalizedSelect(wrap);
+}
+
+function syncPersonalizedSelect(wrap) {
+  const select = document.getElementById(wrap.dataset.selectId);
+  const button = wrap.querySelector('.personalized-select-button');
+  const value = wrap.querySelector('.personalized-select-value');
+  if (!select || !button || !value) return;
+  const option = select.options[select.selectedIndex];
+  const label = option ? option.textContent : '';
+  value.textContent = label;
+  button.setAttribute('aria-label', (wrap.querySelector('.personalized-select-menu').getAttribute('aria-label') || 'Choice') + ': ' + label);
+  wrap.querySelectorAll('.personalized-select-option').forEach(item => {
+    item.setAttribute('aria-selected', String(item.dataset.value === select.value));
+  });
+}
+
+function syncPersonalizedSelectById(id) {
+  const wrap = document.querySelector(`.personalized-select-wrap[data-select-id="${id}"]`);
+  if (wrap) syncPersonalizedSelect(wrap);
+}
+
+function openPersonalizedSelect(wrap) {
+  const menu = wrap.querySelector('.personalized-select-menu');
+  const button = wrap.querySelector('.personalized-select-button');
+  menu.hidden = false;
+  wrap.classList.add('is-open');
+  button.setAttribute('aria-expanded', 'true');
+  const selected = menu.querySelector('[aria-selected="true"]') || menu.firstElementChild;
+  if (selected) selected.focus({preventScroll: true});
+}
+
+function closePersonalizedSelect(wrap, returnFocus = true) {
+  const menu = wrap.querySelector('.personalized-select-menu');
+  const button = wrap.querySelector('.personalized-select-button');
+  if (menu.hidden) return;
+  menu.hidden = true;
+  wrap.classList.remove('is-open');
+  button.setAttribute('aria-expanded', 'false');
+  if (returnFocus) button.focus();
+}
+
+function togglePersonalizedSelect(wrap) {
+  if (wrap.querySelector('.personalized-select-button').getAttribute('aria-expanded') === 'true') {
+    closePersonalizedSelect(wrap);
+  } else {
+    openPersonalizedSelect(wrap);
+  }
+}
+
+function handlePersonalizedOptionKeydown(event, wrap) {
+  const options = Array.from(wrap.querySelectorAll('.personalized-select-option'));
+  const index = options.indexOf(event.currentTarget);
+  let next = index;
+  if (event.key === 'ArrowDown') next = Math.min(index + 1, options.length - 1);
+  else if (event.key === 'ArrowUp') next = Math.max(index - 1, 0);
+  else if (event.key === 'Home') next = 0;
+  else if (event.key === 'End') next = options.length - 1;
+  else if (event.key === 'Enter' || event.key === ' ') {
+    event.preventDefault(); event.currentTarget.click(); return;
+  } else if (event.key === 'Escape') {
+    event.preventDefault(); closePersonalizedSelect(wrap); return;
+  } else if (event.key === 'Tab') {
+    closePersonalizedSelect(wrap, false); return;
+  } else return;
+  event.preventDefault();
+  options[next].focus();
+}
+
+// The native select remains the category value source, while this listbox
+// provides consistent icon-rich options across the desktop webview backends.
+function categoryIconFile(value) {
+  return CATEGORY_ICON_FILES[value]
+    || (value ? 'star.svg' : 'circle-outline.svg');
+}
+
+function categoryIconSource(value) {
+  return '/static/icons/' + categoryIconFile(value) + ASSET_QUERY;
+}
+
+function categoryOptionElements() {
+  return Array.from(
+    document.querySelectorAll('#category-select-menu .category-select-option')
+  );
+}
+
+function initCategoryDropdown() {
+  const wrap = document.querySelector('.category-select-wrap');
+  const button = document.getElementById('category-select-button');
+  if (!wrap || !button || wrap.dataset.initialized === 'true') return;
+  wrap.dataset.initialized = 'true';
+
+  button.addEventListener('click', toggleCategoryDropdown);
+  button.addEventListener('keydown', handleCategoryButtonKeydown);
+  document.addEventListener('click', event => {
+    if (!wrap.contains(event.target)) closeCategoryDropdown(false);
+  });
+
+  rebuildCategoryMenu();
+}
+
+function rebuildCategoryMenu() {
+  const select = document.getElementById('ev-category');
+  const menu = document.getElementById('category-select-menu');
+  if (!select || !menu) return;
+
+  menu.replaceChildren();
+  for (const option of select.options) {
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'category-select-option';
+    item.dataset.value = option.value;
+    item.setAttribute('role', 'option');
+    item.setAttribute('aria-selected', String(option.value === select.value));
+    item.tabIndex = -1;
+
+    const icon = document.createElement('img');
+    icon.className = 'category-option-icon';
+    icon.src = categoryIconSource(option.value);
+    icon.alt = '';
+    icon.setAttribute('aria-hidden', 'true');
+
+    const label = document.createElement('span');
+    label.textContent = option.textContent;
+    item.append(icon, label);
+    item.addEventListener('click', () => selectCategory(option.value));
+    item.addEventListener('keydown', handleCategoryOptionKeydown);
+    menu.appendChild(item);
+  }
+  updateCategoryIcon();
+}
+
+function openCategoryDropdown() {
+  const wrap = document.querySelector('.category-select-wrap');
+  const button = document.getElementById('category-select-button');
+  const menu = document.getElementById('category-select-menu');
+  if (!wrap || !button || !menu) return;
+
+  menu.hidden = false;
+  wrap.classList.add('is-open');
+  button.setAttribute('aria-expanded', 'true');
+
+  const options = categoryOptionElements();
+  const selected = options.find(
+    option => option.getAttribute('aria-selected') === 'true'
+  );
+  const target = selected || options[0];
+  if (target) {
+    target.focus({preventScroll: true});
+    target.scrollIntoView({block: 'nearest'});
+  }
+}
+
+function closeCategoryDropdown(returnFocus = true) {
+  const wrap = document.querySelector('.category-select-wrap');
+  const button = document.getElementById('category-select-button');
+  const menu = document.getElementById('category-select-menu');
+  if (!wrap || !button || !menu) return;
+
+  menu.hidden = true;
+  wrap.classList.remove('is-open');
+  button.setAttribute('aria-expanded', 'false');
+  if (returnFocus) button.focus();
+}
+
+function toggleCategoryDropdown() {
+  const button = document.getElementById('category-select-button');
+  if (!button) return;
+  if (button.getAttribute('aria-expanded') === 'true') {
+    closeCategoryDropdown();
+  } else {
+    openCategoryDropdown();
+  }
+}
+
+function selectCategory(value) {
+  const select = document.getElementById('ev-category');
+  if (!select) return;
+  select.value = value;
+  select.dispatchEvent(new Event('change', {bubbles: true}));
+  closeCategoryDropdown();
+}
+
+function handleCategoryButtonKeydown(event) {
+  if (['ArrowDown', 'ArrowUp', 'Enter', ' '].includes(event.key)) {
+    event.preventDefault();
+    openCategoryDropdown();
+  } else if (
+    event.key === 'Escape'
+    && event.currentTarget.getAttribute('aria-expanded') === 'true'
+  ) {
+    event.preventDefault();
+    closeCategoryDropdown();
+  }
+}
+
+function handleCategoryOptionKeydown(event) {
+  const options = categoryOptionElements();
+  const index = options.indexOf(event.currentTarget);
+  let nextIndex = index;
+
+  if (event.key === 'ArrowDown') nextIndex = Math.min(index + 1, options.length - 1);
+  else if (event.key === 'ArrowUp') nextIndex = Math.max(index - 1, 0);
+  else if (event.key === 'Home') nextIndex = 0;
+  else if (event.key === 'End') nextIndex = options.length - 1;
+  else if (event.key === 'Enter' || event.key === ' ') {
+    event.preventDefault();
+    selectCategory(event.currentTarget.dataset.value);
+    return;
+  } else if (event.key === 'Escape') {
+    event.preventDefault();
+    closeCategoryDropdown();
+    return;
+  } else if (event.key === 'Tab') {
+    closeCategoryDropdown(false);
+    return;
+  } else {
+    return;
+  }
+
+  event.preventDefault();
+  if (options[nextIndex]) options[nextIndex].focus();
+}
+
 function updateCategoryIcon() {
   const select = document.getElementById('ev-category');
-  const icon = select.parentElement.querySelector('.category-select-icon');
-  if (!icon) return;
-  // PACKAGING: Every filename here must exist under static/icons and in asset tests.
-  const iconFiles = {
-    work: 'briefcase.svg',
-    personal: 'user.svg',
-    health: 'heart.svg',
-    other: 'tag.svg',
-    custom: 'star.svg'
-  };
-  icon.src = '/static/icons/'
-    + (iconFiles[select.value] || (select.value ? 'star.svg' : 'circle-outline.svg'))
-    + ASSET_QUERY;
+  const button = document.getElementById('category-select-button');
+  const icon = button ? button.querySelector('.category-select-icon') : null;
+  const label = document.getElementById('category-select-value');
+  if (!select || !button || !icon || !label) return;
+
+  const selectedOption = Array.from(select.options).find(
+    option => option.value === select.value
+  );
+  const selectedLabel = selectedOption ? selectedOption.textContent : 'None';
+  icon.src = categoryIconSource(select.value);
+  label.textContent = selectedLabel;
+  button.setAttribute('aria-label', 'Category: ' + selectedLabel);
+
+  for (const option of categoryOptionElements()) {
+    option.setAttribute(
+      'aria-selected', String(option.dataset.value === select.value)
+    );
+  }
 }
 
 async function refreshCategoryOptions() {
@@ -454,7 +1204,7 @@ async function refreshCategoryOptions() {
     } else {
       sel.value = currentVal;
     }
-    updateCategoryIcon();
+    rebuildCategoryMenu();
   } catch(e) { /* ignore */ }
 }
 function cancelEdit() {
@@ -473,30 +1223,97 @@ function cancelEdit() {
   document.getElementById('custom-cat').style.display = 'none';
   document.getElementById('custom-recur').style.display = 'none';
   updateCategoryIcon();
+  syncPersonalizedSelectById('ev-recurrence');
+  syncPersonalizedSelectById('custom-unit');
   document.getElementById('form-title').innerHTML = '<img src="/static/icons/plus.svg" class="icon"> Add New Event';
   document.getElementById('btn-save').innerHTML = '<img src="/static/icons/plus-white.svg" class="icon"> Add Event';
   document.getElementById('btn-cancel').style.display = 'none';
+  rememberFormBaseline();
 }
 
 // ── Delete ──────────────────────────────────────────────
+function dismissUndoToast() {
+  if (!_undoState) return;
+  clearTimeout(_undoState.timer);
+  if (_undoState.toast.parentNode) _undoState.toast.remove();
+  _undoState = null;
+}
+
+function scheduleUndoDismiss(delay) {
+  if (!_undoState) return;
+  const state = _undoState;
+  clearTimeout(state.timer);
+  state.timer = setTimeout(() => {
+    if (_undoState === state) dismissUndoToast();
+  }, delay);
+}
+
+function showUndoToast(id) {
+  dismissUndoToast();
+  const toast = document.createElement('div');
+  toast.className = 'toast undo-toast';
+  toast.setAttribute('role', 'status');
+  toast.setAttribute('aria-live', 'polite');
+  toast.title = 'Hover to keep — click to dismiss';
+
+  const message = document.createElement('span');
+  message.textContent = 'Deleted.';
+  const undoButton = document.createElement('button');
+  undoButton.type = 'button';
+  undoButton.className = 'undo-button';
+  undoButton.textContent = 'Undo';
+  undoButton.title = 'Undo deletion (' + PRIMARY_SHORTCUT_LABEL + '+Z)';
+  undoButton.setAttribute('aria-keyshortcuts', 'Control+Z Meta+Z');
+  undoButton.addEventListener('click', event => {
+    event.stopPropagation();
+    undoLatestDeletion();
+  });
+  toast.append(message, undoButton);
+
+  _undoState = {id, toast, timer: null, restoring: false};
+  toast.addEventListener('click', dismissUndoToast);
+  toast.addEventListener('mouseenter', () => {
+    if (_undoState && _undoState.toast === toast) clearTimeout(_undoState.timer);
+  });
+  toast.addEventListener('mouseleave', () => {
+    if (_undoState && _undoState.toast === toast) scheduleUndoDismiss(2000);
+  });
+  document.body.appendChild(toast);
+  scheduleUndoDismiss(3000);
+}
+
+async function undoLatestDeletion() {
+  const state = _undoState;
+  if (!state || state.restoring) return;
+  state.restoring = true;
+  clearTimeout(state.timer);
+  const button = state.toast.querySelector('.undo-button');
+  if (button) {
+    button.disabled = true;
+    button.textContent = 'Restoring…';
+  }
+  try {
+    await api('POST', '/api/events/' + state.id + '/restore');
+    if (_undoState === state) dismissUndoToast();
+    await refreshEventData(false);
+    showToast('Restored!');
+  } catch(e) {
+    state.restoring = false;
+    if (button) {
+      button.disabled = false;
+      button.textContent = 'Undo';
+    }
+    if (_undoState === state) scheduleUndoDismiss(3000);
+    showToast('Could not restore the event.');
+  }
+}
+
 async function deleteEvent(id) {
   const events = await api('GET', '/api/events');
   const ev = events.find(e => e.id === id);
   if (!confirm('Delete "' + (ev ? ev.name : 'event') + '"?')) return;
   await api('DELETE', '/api/events/' + id);
-  // Undo toast — 3 s auto-dismiss, stays while hovered
-  const toast = document.createElement('div');
-  toast.className = 'toast undo-toast';
-  toast.innerHTML = 'Deleted. <button onclick="'
-    + "api('POST','/api/events/" + id + "/restore').then(()=>{showToast('Restored!');loadEvents();});"
-    + "this.parentElement.remove();"
-    + '" style="background:var(--success);color:#fff;border:none;padding:4px 14px;border-radius:4px;cursor:pointer;font-weight:600;margin-left:8px;">Undo</button>';
-  let undoTimer = setTimeout(() => { if (toast.parentNode) toast.remove(); }, 3000);
-  toast.title = 'Hover to keep — click to dismiss';
-  toast.onclick = () => { clearTimeout(undoTimer); toast.remove(); };
-  toast.onmouseenter = () => clearTimeout(undoTimer);
-  toast.onmouseleave = () => { undoTimer = setTimeout(() => { if (toast.parentNode) toast.remove(); }, 2000); };
-  document.body.appendChild(toast);
+  showUndoToast(id);
   loadEvents();
 }
 
@@ -520,7 +1337,22 @@ async function pollReminders() {
     cd._nextAt = data.next_at || null;
     updateCountdown();
     if (data.reminders && data.reminders.length) {
-      data.reminders.forEach(r => fireReminder(r.title, r.message, r.id, r.native_notified === true));
+      let deliveredWhileHidden = 0;
+      data.reminders.forEach(r => {
+        const deliveredAt = Date.parse(r.delivered_at || '');
+        const staleNativeDelivery = r.native_notified === true
+          && Number.isFinite(deliveredAt)
+          && Date.now() - deliveredAt > 30_000;
+        if (staleNativeDelivery) {
+          deliveredWhileHidden += 1;
+          return;
+        }
+        fireReminder(r.title, r.message, r.id, r.native_notified === true);
+      });
+      if (deliveredWhileHidden) {
+        const noun = deliveredWhileHidden === 1 ? 'reminder was' : 'reminders were';
+        showToast(deliveredWhileHidden + ' ' + noun + ' delivered while TapTap was hidden.', 6000);
+      }
     }
   } catch(e) {
     // server not ready yet — ignore

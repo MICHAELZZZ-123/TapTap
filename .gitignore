@@ -74,6 +74,8 @@ junit.xml
 .env
 .env.*
 !.env.example
+/PROJECT_MEMO.md
+/AGENTS.md
 *.key
 *.p12
 *.pfx

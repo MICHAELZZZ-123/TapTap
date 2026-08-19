@@ -8,6 +8,9 @@ import tempfile
 import unittest
 from html.parser import HTMLParser
 from pathlib import Path
+from unittest.mock import patch
+
+from windows_integration import AutostartStatus
 
 
 class _IdParser(HTMLParser):
@@ -100,6 +103,7 @@ class AppContractTests(unittest.TestCase):
             ("/api/history", frozenset({"GET"})),
             ("/api/pending", frozenset({"GET"})),
             ("/api/time", frozenset({"GET"})),
+            ("/api/settings/autostart", frozenset({"GET", "PUT"})),
         }
         self.assertEqual(actual, expected)
 
@@ -129,13 +133,17 @@ class AppContractTests(unittest.TestCase):
         parser.feed(response.get_data(as_text=True))
         expected_ids = {
             "btn-cancel", "btn-delete-sel", "btn-save", "btn-select-all",
-            "btn-select-mode", "clock", "countdown", "custom-cat",
+            "btn-select-mode", "category-select-button", "category-select-menu",
+            "category-select-value", "clock", "countdown", "custom-cat",
             "custom-cat-name", "custom-n", "custom-recur", "custom-unit",
             "edit-id", "empty", "ev-category", "ev-date", "ev-desc",
             "ev-name", "ev-recurrence", "ev-reminder", "ev-time",
             "event-list", "form-card", "form-title", "history-actions",
             "history-list", "history-panel", "history-toggle", "mode-dark",
-            "mode-light", "mode-switch", "selected-count", "status",
+            "mode-light", "mode-switch", "selected-count", "shortcuts-button",
+            "shortcuts-close", "shortcuts-description", "shortcuts-dialog",
+            "shortcuts-title", "recurrence-select-button", "status",
+            "autostart-control", "autostart-status", "autostart-toggle",
         }
         self.assertEqual(parser.ids, expected_ids)
 
@@ -149,12 +157,36 @@ class AppContractTests(unittest.TestCase):
         )
         expected_actions = {
             "setMode", "playBeep", "calibrateClock", "calibratedNow",
-            "localDateValue", "recurrenceLabel",
+            "localDateValue", "recurrenceLabel", "recalibrateAndAlignClock",
+            "millisecondsToNextClockTick", "scheduleClockTick", "tickClock",
+            "resumeClock",
             "_scheduleNextPoll", "updateClock", "updateCountdown", "showToast",
             "requestNotifyPermission", "fireReminder", "api", "loadEvents",
             "esc", "saveEvent", "startEdit", "toggleCustomRecur",
             "toggleCustomCat", "refreshCategoryOptions", "cancelEdit",
             "updateCategoryIcon", "deleteEvent", "snoozeEvent", "pollReminders",
+            "isEditableTarget", "choiceMenuIsOpen", "closeOpenChoiceMenus",
+            "isPrimaryShortcut", "isKnownAppShortcut",
+            "isShortcutHintKey", "shortcutDialogIsOpen", "updateShortcutLabels",
+            "shortcutDialogFocusableElements", "trapShortcutDialogFocus",
+            "openShortcuts", "closeShortcuts", "toggleShortcuts",
+            "initShortcutUI", "formSnapshot", "rememberFormBaseline",
+            "loadAutostartSetting", "setAutostartSetting", "initAutostartUI",
+            "formHasUnsavedChanges", "formIsActive",
+            "confirmDiscardFormChanges", "startNewEvent",
+            "cancelFormFromShortcut", "refreshEventData", "handleAppShortcut",
+            "dismissUndoToast", "scheduleUndoDismiss", "showUndoToast",
+            "undoLatestDeletion",
+            "categoryIconFile", "categoryIconSource", "categoryOptionElements",
+            "initCategoryDropdown", "rebuildCategoryMenu",
+            "openCategoryDropdown", "closeCategoryDropdown",
+            "toggleCategoryDropdown", "selectCategory",
+            "handleCategoryButtonKeydown", "handleCategoryOptionKeydown",
+            "initPersonalizedSelects", "rebuildPersonalizedSelect",
+            "syncPersonalizedSelect", "syncPersonalizedSelectById",
+            "openPersonalizedSelect", "closePersonalizedSelect",
+            "togglePersonalizedSelect", "handlePersonalizedOptionKeydown",
+            "snoozeEventFromControls",
             "_renderHistory",
             "toggleHistory", "updateSelected", "toggleSelectMode",
             "toggleSelectAll", "deleteSelected", "deleteOneHist", "reuseEvent",
@@ -171,6 +203,142 @@ class AppContractTests(unittest.TestCase):
         self.assertIn(f'/static/style.css?v={self.module._ASSET_VERSION}', html)
         self.assertIn(self.module._API_TOKEN, html)
 
+    def test_clock_ticks_each_second_and_recovers_after_resume(self) -> None:
+        source = (
+            Path(self.module._BASE_DIR) / "static" / "app.js"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("const CLOCK_MS = 1000;", source)
+        self.assertNotIn("setInterval(tickClock, CLOCK_MS);", source)
+        self.assertIn(
+            "millisecondsToNextClockTick(calibratedNow().getTime())", source
+        )
+        self.assertIn("tickClock();\n    scheduleClockTick();", source)
+
+        tick_body = source.split("function tickClock()", 1)[1].split(
+            "function resumeClock()", 1
+        )[0]
+        self.assertIn("CLOCK_RESUME_GAP_MS", tick_body)
+        self.assertIn("recalibrateAndAlignClock()", tick_body)
+
+        resume_body = source.split("function resumeClock()", 1)[1].split(
+            "async function updateCountdown()", 1
+        )[0]
+        self.assertIn("updateClock();", resume_body)
+        self.assertIn("scheduleClockTick();", resume_body)
+        self.assertIn("recalibrateAndAlignClock();", resume_body)
+
+        self.assertIn("resumeClock();\n    pollReminders()", source)
+        self.assertIn("window.addEventListener('focus', resumeClock);", source)
+        self.assertIn("window.addEventListener('pageshow', resumeClock);", source)
+
+    def test_countdown_formats_long_durations_compactly(self) -> None:
+        source = (
+            Path(self.module._BASE_DIR) / "static" / "app.js"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("function formatCountdown(seconds)", source)
+        self.assertIn("if (days < 30)", source)
+        self.assertIn("months < 12", source)
+        self.assertIn("years = Math.floor(days / 365)", source)
+        self.assertIn("remainingMonths", source)
+
+    def test_keyboard_shortcut_map_is_visible_safe_and_fixed(self) -> None:
+        html = self.client.get("/").get_data(as_text=True)
+        root = Path(self.module._BASE_DIR)
+        source = (root / "static" / "app.js").read_text(encoding="utf-8")
+        styles = (root / "static" / "style.css").read_text(encoding="utf-8")
+
+        self.assertRegex(
+            html,
+            r'id="shortcuts-button"[^>]*>Shortcuts</button>',
+        )
+        self.assertIn('aria-keyshortcuts="Shift+/"', html)
+        self.assertIn('id="shortcuts-dialog" class="shortcuts-overlay" role="dialog"', html)
+        self.assertIn('aria-modal="true"', html)
+        self.assertIn('id="shortcuts-close"', html)
+        self.assertIn('Enter behaves normally in form fields.', html)
+        for label in (
+            "Ctrl+N", "Ctrl+S", "Ctrl+R", "Alt+P", "Ctrl+Z", "Shift+/",
+        ):
+            with self.subTest(label=label):
+                self.assertIn(label, html)
+
+        self.assertNotIn("e.key === 'Enter' && !e.shiftKey", source)
+        self.assertIn("document.addEventListener('keydown', handleAppShortcut);", source)
+        for key in ("n", "s", "r", "z"):
+            with self.subTest(key=key):
+                self.assertIn(f"isPrimaryShortcut(event, '{key}')", source)
+        self.assertIn("event.key.toLowerCase() === 'p'", source)
+        self.assertRegex(
+            source,
+            r"event\.key\.toLowerCase\(\) === 'p'[\s\S]{0,100}"
+            r"!isEditableTarget\(event\.target\)",
+        )
+        self.assertIn("event.code === 'Slash'", source)
+        self.assertIn("!isEditableTarget(event.target)", source)
+        self.assertIn("event.isComposing", source)
+        self.assertIn("event.repeat", source)
+        self.assertIn("confirm('Discard unsaved changes?')", source)
+        self.assertIn("rememberFormBaseline();", source)
+        self.assertIn("undoLatestDeletion();", source)
+        self.assertIn(".shortcuts-overlay[hidden] { display: none; }", styles)
+        self.assertIn("body.shortcuts-open { overflow: hidden; }", styles)
+
+    def test_windows_autostart_control_is_opt_in_and_error_aware(self) -> None:
+        html = self.client.get("/").get_data(as_text=True)
+        source = (
+            Path(self.module._BASE_DIR) / "static" / "app.js"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('id="autostart-control" class="autostart-control" hidden', html)
+        self.assertIn('id="autostart-toggle" type="checkbox"', html)
+        self.assertIn("Start with Windows", html)
+        self.assertIn("/api/settings/autostart", source)
+        self.assertIn("{enabled: requested}", source)
+        self.assertIn("toggle.checked = previous;", source)
+        self.assertIn("initAutostartUI();", source)
+        self.assertIn("deliveredWhileHidden", source)
+
+    def test_autostart_api_reads_validates_and_updates_the_setting(self) -> None:
+        class FakeAutostartManager:
+            enabled = False
+
+            def status(self):
+                return AutostartStatus(
+                    supported=True,
+                    enabled=self.enabled,
+                    registered=self.enabled,
+                )
+
+            def set_enabled(self, enabled):
+                self.enabled = enabled
+                return self.status()
+
+        manager = FakeAutostartManager()
+        with patch.object(self.module, "autostart_manager", manager):
+            status = self.client.get(
+                "/api/settings/autostart", headers=self.headers
+            )
+            self.assertEqual(status.status_code, 200)
+            self.assertFalse(status.get_json()["enabled"])
+
+            malformed = self.client.put(
+                "/api/settings/autostart",
+                json={"enabled": "yes"},
+                headers=self.headers,
+            )
+            self.assertEqual(malformed.status_code, 400)
+
+            enabled = self.client.put(
+                "/api/settings/autostart",
+                json={"enabled": True},
+                headers=self.headers,
+            )
+            self.assertEqual(enabled.status_code, 200)
+            self.assertTrue(enabled.get_json()["enabled"])
+            self.assertTrue(manager.enabled)
+
     def test_history_reuse_clears_edit_mode_before_loading_template(self) -> None:
         source = (
             Path(self.module._BASE_DIR) / "static" / "history.js"
@@ -182,7 +350,7 @@ class AppContractTests(unittest.TestCase):
         )
 
     def test_release_metadata_is_synchronized(self) -> None:
-        version = "0.2.1"
+        version = "0.3.0"
         root = Path(self.module.__file__).resolve().parent
 
         self.assertIn(
@@ -216,6 +384,50 @@ class AppContractTests(unittest.TestCase):
                     self.assertEqual(response.status_code, 200)
                     self.assertIn(b"<svg", response.data)
 
+    def test_category_dropdown_renders_every_option_with_an_icon(self) -> None:
+        html = self.client.get("/").get_data(as_text=True)
+        source = (
+            Path(self.module._BASE_DIR) / "static" / "app.js"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('id="category-select-button"', html)
+        self.assertIn('aria-haspopup="listbox"', html)
+        self.assertIn('id="category-select-menu"', html)
+        self.assertIn('role="listbox"', html)
+        self.assertIn('id="ev-category" class="category-native-select" hidden', html)
+
+        self.assertIn("for (const option of select.options)", source)
+        self.assertIn("icon.src = categoryIconSource(option.value);", source)
+        self.assertIn("label.textContent = option.textContent;", source)
+        self.assertIn(
+            "select.dispatchEvent(new Event('change', {bubbles: true}));",
+            source,
+        )
+        self.assertIn("event.key === 'Escape'", source)
+        for icon in (
+            "circle-outline.svg", "briefcase.svg", "user.svg",
+            "heart.svg", "tag.svg", "star.svg",
+        ):
+                with self.subTest(icon=icon):
+                    self.assertIn(icon, source)
+
+    def test_all_choice_fields_use_the_personalized_dropdown(self) -> None:
+        html = self.client.get("/").get_data(as_text=True)
+        source = (
+            Path(self.module._BASE_DIR) / "static" / "app.js"
+        ).read_text(encoding="utf-8")
+
+        for select_id in ("ev-recurrence", "custom-unit"):
+            with self.subTest(select_id=select_id):
+                self.assertIn(
+                    f'data-select-id="{select_id}"', html,
+                )
+        self.assertIn('class="personalized-select-menu" role="listbox"', html)
+        self.assertIn('class="personalized-native-select" hidden', html)
+        self.assertIn('data-select-id="snooze-select-${ev.id}"', source)
+        self.assertIn("initPersonalizedSelects(list);", source)
+        self.assertIn("handlePersonalizedOptionKeydown", source)
+
     def test_desktop_icon_format_matches_native_backend(self) -> None:
         windows_icon = Path(self.module._desktop_icon_path("win32"))
         other_icon = Path(self.module._desktop_icon_path("linux"))
@@ -225,6 +437,15 @@ class AppContractTests(unittest.TestCase):
         self.assertEqual(other_icon.name, "app-icon.png")
         self.assertTrue(windows_icon.is_file())
         self.assertTrue(other_icon.is_file())
+
+    def test_desktop_notifier_resources_are_packaged(self) -> None:
+        spec = (Path(self.module._BASE_DIR) / "taptap.spec").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('collect_data_files("desktop_notifier"', spec)
+        self.assertIn('includes=["resources/*"]', spec)
+        self.assertIn('"desktop_notifier.resources"', spec)
 
     def test_api_requires_the_process_token(self) -> None:
         self.assertEqual(self.client.get("/api/events").status_code, 403)

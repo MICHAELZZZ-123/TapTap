@@ -5,7 +5,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-if (-not $IsWindows) {
+if ($env:OS -ne "Windows_NT") {
     throw "The native-window smoke test must run on Windows."
 }
 

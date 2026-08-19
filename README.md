@@ -4,7 +4,7 @@ Native desktop event reminders built with Python, Flask, pywebview, and a local
 SQLite database. The interface is HTML/CSS/JavaScript, hosted inside a normal
 desktop window; no browser tab or terminal needs to stay open.
 
-Current source release: **0.2.1**. See [CHANGELOG.md](CHANGELOG.md) for the
+Current source release: **0.3.0**. See [CHANGELOG.md](CHANGELOG.md) for the
 release description.
 
 ## Run a packaged build
@@ -15,8 +15,37 @@ release description.
 - **macOS:** open `TapTap.app`. Publicly distributed builds must be signed for
   native notifications to work.
 
-Minimizing the window keeps reminders active. Closing the window quits TapTap.
-The operating system may ask for notification permission on first use.
+Minimizing the window keeps reminders active. On Windows, closing the window
+hides TapTap to the notification area so native notifications continue; use the
+tray icon's single left-click or **Open TapTap** action to reopen it, and
+**Quit TapTap** to fully stop it. Closing the window still quits TapTap on Linux
+and macOS. The operating system may ask for notification permission on first
+use.
+
+### What's new in the current build
+
+- Windows can stay active in the notification area after its window is closed,
+  with a one-click restore action and an explicit Quit command.
+- **Start with Windows** can launch the packaged app hidden for the current
+  Windows user, without administrator access.
+- Reminder checks align to wall-clock seconds, with delayed startup and
+  sleep/wake catch-up coalesced into one alert per event.
+- The refreshed keyboard shortcuts, category picker, live clock, and
+  long-range countdown make regular scheduling faster to operate.
+
+### Windows background and sign-in startup
+
+The packaged Windows application shows an opt-in **Start with Windows** checkbox
+in the header. When enabled, TapTap registers only the current user and launches
+hidden in the notification area at sign-in; it never requires administrator
+access. Opening `TapTap.exe` while that background instance is running restores
+the existing window instead of starting another reminder worker.
+
+Disabling the checkbox removes TapTap's startup entry. If an enabled portable
+executable is moved, opening it manually from the new location repairs the
+registered path. Turn the setting off before deleting the portable executable:
+without an installer, a deleted program cannot remove its own Windows startup
+entry. Windows Startup Apps can also disable the entry independently.
 
 ## Run from source
 
@@ -49,21 +78,24 @@ sudo apt install libnss3 libxkbfile1 libxcb-cursor0 libxcb-icccm4 \
 | Feature | Detail |
 |---|---|
 | Native desktop window | Lightweight OS webview instead of an external browser |
-| Reliable reminders | Python worker checks every second, including while minimized |
+| Reliable reminders | Python worker checks on wall-clock second boundaries, including while minimized |
 | Native notifications | Linux, macOS, and Windows notifications with browser fallback |
+| Windows background mode | Close-to-tray with explicit Open and Quit actions while reminders continue |
+| Windows sign-in startup | Optional per-user launch directly into the notification area |
 | Reminders | Single or comma-separated offsets, such as `60, 30, 10` |
 | Categories | Work, Personal, Health, Other, or custom colored labels |
+| Keyboard shortcuts | Fixed Windows/macOS-aware bindings with a built-in Shortcuts reference |
 | Snooze | Presets from 1–30 minutes plus a custom duration |
 | Recurrence | Daily, weekly, monthly, yearly, or every N units |
 | History | Reuse or permanently remove completed events |
 | In-window alerts | Persistent bottom-right popup with dismiss and quick-snooze controls |
 | Sound | Original two-tone reminder chirp |
-| Undo delete | Three-second undo toast that pauses while hovered |
-| Countdown | Live seconds/minutes until the next reminder |
+| Undo delete | Three-second undo toast that pauses while hovered and supports `Ctrl+Z` |
+| Countdown | Live seconds through years until the next reminder |
 | Adaptive UI polling | Five seconds normally, one second near a reminder, paused while hidden |
 | Past-event guard | Keeps the original “Gone is gone, my friend” rejection toast |
 | Dark/light mode | Saved between desktop sessions |
-| Single instance | A second launch exits instead of duplicating reminders |
+| Single instance | A second Windows launch restores the running window instead of duplicating reminders |
 | Local API protection | Every internal API call uses a random per-launch token |
 
 ## User data
@@ -110,9 +142,16 @@ python scripts/generate_icons.py
 1. Run `python -m unittest discover -s tests -v`.
 2. Build on every target OS with a clean virtual environment.
 3. Test add/edit/delete, notification permission, minimize, sleep/wake, snooze,
-   recurrence, and a second launch.
+   recurrence, close-to-tray, sign-in startup, and a second launch.
 4. Install and run on a clean standard-user machine.
 5. Code-sign public Windows and macOS releases; notarize macOS builds.
+
+Windows release builds must pass both native checks:
+
+```powershell
+./scripts/smoke_test_windows_window.ps1 -Executable ./dist/TapTap.exe
+./scripts/smoke_test_windows_background.ps1 -Executable ./dist/TapTap.exe
+```
 
 ## Project files
 
@@ -120,6 +159,7 @@ python scripts/generate_icons.py
 |---|---|
 | `app.py` | Flask API, authenticated local host, and desktop entry point |
 | `reminders.py` | Background scheduler and native notification delivery |
+| `windows_integration.py` | Windows autostart, notification-area lifecycle, and existing-window activation |
 | `database.py` | SQLite storage and recurrence lifecycle |
 | `utils.py` | Date and reminder parsing helpers |
 | `templates/index.html` | HTML structure |

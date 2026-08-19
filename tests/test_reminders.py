@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
+import threading
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -27,6 +28,38 @@ class SlowAsyncNotifier:
     async def send(self, **kwargs) -> None:
         del kwargs
         await asyncio.sleep(10)
+
+
+class BlockingNotifier:
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self.closed = False
+
+    def send(self, title: str, message: str) -> bool:
+        del title, message
+        self.started.set()
+        self.release.wait(timeout=5)
+        return True
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class RecordingEngine:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.second_check = threading.Event()
+        self._lock = threading.Lock()
+
+    def process_due(self, now: datetime | None = None) -> list[dict]:
+        del now
+        with self._lock:
+            self.calls += 1
+            if self.calls == 1:
+                return [{"title": "Boundary", "message": "On time", "id": 1}]
+            self.second_check.set()
+            return []
 
 
 class ReminderEngineTests(unittest.TestCase):
@@ -69,6 +102,17 @@ class ReminderEngineTests(unittest.TestCase):
 
         self.assertEqual(self.engine.process_due(datetime(2030, 1, 2, 12, 1)), [])
         self.assertEqual(self.db.get_event(event_id)["active"], 0)
+
+    def test_offset_becomes_due_at_the_exact_full_minute(self) -> None:
+        self.add_event(reminder_min="15")
+
+        before = self.engine.process_due(datetime(2030, 1, 2, 11, 44, 59, 999999))
+        at_boundary = self.engine.process_due(datetime(2030, 1, 2, 11, 45, 0))
+
+        self.assertEqual(before, [])
+        self.assertEqual(len(at_boundary), 1)
+        # A configured offset does not silently add an event-time (zero) reminder.
+        self.assertEqual(self.engine.process_due(datetime(2030, 1, 2, 12, 0, 0)), [])
 
     def test_snoozed_event_is_not_claimed(self) -> None:
         event_id = self.add_event()
@@ -114,6 +158,14 @@ class ReminderEngineTests(unittest.TestCase):
         self.assertEqual([item["id"] for item in fired], [event_id])
         self.assertEqual(self.db.get_event(event_id)["last_reminded"], "30")
 
+    def test_delayed_start_coalesces_overdue_offsets_per_event(self) -> None:
+        event_id = self.add_event(reminder_min="60,30,10")
+
+        fired = self.engine.process_due(datetime(2030, 1, 2, 11, 35))
+
+        self.assertEqual([item["id"] for item in fired], [event_id])
+        self.assertEqual(self.db.get_event(event_id)["last_reminded"], "30,60")
+
     def test_legacy_timestamp_does_not_refire_an_occurrence(self) -> None:
         event_id = self.add_event(reminder_min="30")
         with self.db._connect() as connection:
@@ -142,8 +194,38 @@ class ReminderEngineTests(unittest.TestCase):
 
         self.assertEqual(len(notifier.sent), 1)
         self.assertTrue(queued[0]["native_notified"])
+        self.assertIsNotNone(datetime.fromisoformat(queued[0]["delivered_at"]))
         self.assertEqual(worker.drain_pending(), queued)
         self.assertEqual(worker.drain_pending(), [])
+
+    def test_worker_wait_is_aligned_to_wall_clock_boundaries(self) -> None:
+        worker = ReminderWorker(
+            self.engine,
+            notifier=FakeNotifier(),
+            wall_time=lambda: 100.25,
+        )
+
+        self.assertAlmostEqual(worker._seconds_until_next_tick(), 0.75)
+        self.assertAlmostEqual(worker._seconds_until_next_tick(101.0), 1.0)
+        self.assertAlmostEqual(worker._seconds_until_next_tick(101.999), 0.001)
+
+    def test_slow_notification_does_not_block_timing_checks(self) -> None:
+        engine = RecordingEngine()
+        notifier = BlockingNotifier()
+        worker = ReminderWorker(engine, notifier=notifier, interval=0.25)
+
+        worker.start()
+        try:
+            self.assertTrue(notifier.started.wait(timeout=1.5))
+            self.assertTrue(engine.second_check.wait(timeout=1.5))
+        finally:
+            notifier.release.set()
+            worker.stop(timeout=2)
+
+        queued = worker.drain_pending()
+        self.assertEqual([item["id"] for item in queued], [1])
+        self.assertTrue(queued[0]["native_notified"])
+        self.assertTrue(notifier.closed)
 
     def test_snooze_reactivates_a_completed_event(self) -> None:
         event_id = self.add_event()

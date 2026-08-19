@@ -63,6 +63,11 @@ jobs:
         shell: pwsh
         run: ./scripts/smoke_test_windows_window.ps1 -Executable '${{ matrix.output }}'
 
+      - name: Smoke-test Windows background lifecycle
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/smoke_test_windows_background.ps1 -Executable '${{ matrix.output }}'
+
       - name: Upload executable
         uses: actions/upload-artifact@v7
         with:

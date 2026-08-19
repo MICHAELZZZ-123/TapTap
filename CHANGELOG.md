@@ -2,6 +2,51 @@
 
 All notable changes to TapTap will be documented in this file.
 
+## [0.3.0] — 2026-08-19
+
+Desktop productivity update focused on dependable Windows background operation,
+more precise reminder delivery, and faster keyboard-driven scheduling.
+
+### Added
+- Fixed keyboard shortcuts for starting, saving, refreshing, showing Past Events,
+  and undoing the latest available deletion, plus a built-in `Shortcuts` panel.
+- Windows notification-area support with **Open TapTap** and **Quit TapTap**
+  actions, so reminders and native notifications continue after the main window
+  is closed. A single left-click on the tray icon reopens the window.
+- An opt-in **Start with Windows** control that registers the packaged executable
+  per user and launches it hidden at sign-in without administrator privileges.
+
+### Changed
+- The next-reminder countdown now uses days, months, and years for distant events.
+- Enter now behaves normally in form controls instead of saving from every
+  field, while Escape and the new-event shortcut protect unfinished drafts with
+  a discard confirmation.
+- A normal Windows launch now restores an existing hidden or minimized TapTap
+  window; duplicate sign-in launches exit silently and cannot create a second
+  reminder worker.
+
+### Fixed
+- Category choices now open in a custom keyboard-accessible dropdown where
+  every preset and saved custom category displays its icon before selection.
+- The top-right clock now visibly ticks every second and immediately
+  recalibrates after window restore, page visibility changes, or sleep/wake;
+  ticks are aligned to full wall-clock seconds instead of page-load timing.
+- Configured reminder offsets are claimed on full-second boundaries, while
+  potentially slow native notification delivery runs outside the timing loop.
+- Delayed startup and wake catch-up collapse simultaneously overdue offsets into
+  one notification per event, and old successful native notifications are not
+  replayed as a popup storm when the window is reopened.
+
+### Upgrade notes
+- Existing events, history, theme, and reminder settings are retained; this
+  update does not migrate or replace the local SQLite database.
+- On Windows, the title-bar close button now hides TapTap to the notification
+  area. Choose **Quit TapTap** from the tray icon's right-click menu when you
+  want to stop reminders completely.
+- **Start with Windows** remains opt-in. Replacing a portable executable at the
+  same path keeps the startup setting valid; after moving it, open the new copy
+  once to repair the registered path before deleting the old copy.
+
 ## [0.2.1] — 2026-08-07
 
 Maintenance release focused on complete packaged assets, safer upgrades, and

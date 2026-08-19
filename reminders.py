@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import queue
 import threading
+import time
 from collections import deque
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -90,12 +92,13 @@ class ReminderEngine:
                     else parse_reminded(reminded_raw)
                 )
 
-                for offset in offsets:
-                    if offset in already_reminded:
-                        continue
-                    if current < event_at - timedelta(minutes=offset):
-                        continue
-
+                due_offsets = [
+                    offset
+                    for offset in offsets
+                    if offset not in already_reminded
+                    and current >= event_at - timedelta(minutes=offset)
+                ]
+                if due_offsets:
                     time_until = event_at - current
                     if time_until.total_seconds() < 0:
                         when = f"Started {human_duration(-time_until)} ago"
@@ -117,9 +120,12 @@ class ReminderEngine:
                             "id": event["id"],
                         }
                     )
-                    # INVARIANT: Persist the claim before leaving this locked pass.
-                    self.database.mark_reminded(event["id"], offset)
-                    already_reminded.add(offset)
+                    # A delayed launch or wake can make several offsets due at
+                    # once. Claim every offset, but emit one notification for the
+                    # event so startup never creates a duplicate reminder storm.
+                    for offset in due_offsets:
+                        self.database.mark_reminded(event["id"], offset)
+                        already_reminded.add(offset)
 
                 if current > event_at:
                     recurrence = event.get("recurrence") or "none"
@@ -242,7 +248,7 @@ class NativeNotifier:
 
 
 class ReminderWorker:
-    """Run reminder checks in the background and buffer in-window popups."""
+    """Claim reminders on wall-clock ticks and deliver them off-scheduler."""
 
     def __init__(
         self,
@@ -250,20 +256,34 @@ class ReminderWorker:
         *,
         notifier: NativeNotifier | None = None,
         interval: float = 1.0,
+        wall_time: Callable[[], float] = time.time,
     ) -> None:
         self.engine = engine
         self.notifier = notifier or NativeNotifier()
         self.interval = max(0.25, interval)
+        self._wall_time = wall_time
         # ROBUSTNESS: Bound queued window popups if the UI is hidden for a long time.
         self._pending: deque[dict] = deque(maxlen=100)
         self._pending_lock = threading.Lock()
+        # INVARIANT: The scheduler is the sole producer; platform notification
+        # calls run on the delivery thread and never delay the next due check.
+        self._delivery_queue: queue.Queue[list[dict]] = queue.Queue()
         self._stop = threading.Event()
+        self._delivery_stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._delivery_thread: threading.Thread | None = None
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
             return
         self._stop.clear()
+        self._delivery_stop.clear()
+        self._delivery_thread = threading.Thread(
+            target=self._run_delivery,
+            name="TapTapNotificationDelivery",
+            daemon=True,
+        )
+        self._delivery_thread.start()
         self._thread = threading.Thread(
             target=self._run,
             name="TapTapReminderWorker",
@@ -273,15 +293,37 @@ class ReminderWorker:
 
     def stop(self, timeout: float = 3.0) -> None:
         self._stop.set()
+        deadline = time.monotonic() + max(0.0, timeout)
         if self._thread is not None and self._thread is not threading.current_thread():
-            self._thread.join(timeout=timeout)
+            self._thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        if (
+            self._delivery_thread is not None
+            and self._delivery_thread is not threading.current_thread()
+        ):
+            self._delivery_thread.join(timeout=max(0.0, deadline - time.monotonic()))
 
     def process_once(self, now: datetime | None = None) -> list[dict]:
         reminders = self.engine.process_due(now=now)
+        return self._deliver(reminders)
+
+    def _deliver(self, reminders: list[dict]) -> list[dict]:
         queued: list[dict] = []
         for reminder in reminders:
-            delivered = self.notifier.send(reminder["title"], reminder["message"])
-            item = {**reminder, "native_notified": delivered}
+            try:
+                delivered = self.notifier.send(reminder["title"], reminder["message"])
+            except Exception:
+                delivered = False
+                _LOG.exception("Could not deliver a claimed reminder")
+            item = {
+                **reminder,
+                "native_notified": delivered,
+                "delivered_at": datetime.now().astimezone().isoformat(),
+            }
+            if delivered:
+                _LOG.info(
+                    "Native desktop notification dispatched for event %s",
+                    reminder.get("id"),
+                )
             queued.append(item)
         if queued:
             with self._pending_lock:
@@ -294,13 +336,44 @@ class ReminderWorker:
             self._pending.clear()
         return items
 
+    def _seconds_until_next_tick(self, now: float | None = None) -> float:
+        """Return a delay which ends on the next wall-clock interval boundary."""
+        current = self._wall_time() if now is None else now
+        elapsed = current % self.interval
+        return self.interval if elapsed < 1e-9 else self.interval - elapsed
+
     def _run(self) -> None:
         try:
             while not self._stop.is_set():
                 try:
-                    self.process_once()
+                    reminders = self.engine.process_due()
+                    if reminders:
+                        # TIMING: Claim the whole due batch on the aligned scheduler
+                        # tick. Native delivery happens separately and cannot shift
+                        # the next full-second check.
+                        self._delivery_queue.put(reminders)
                 except Exception:
                     _LOG.exception("Reminder background check failed")
-                self._stop.wait(self.interval)
+                self._stop.wait(self._seconds_until_next_tick())
         finally:
+            # The scheduler is the only producer. Once it exits, delivery can drain
+            # everything already claimed and close the platform notifier safely.
+            self._delivery_stop.set()
+
+    def _run_delivery(self) -> None:
+        try:
+            while not self._delivery_stop.is_set() or not self._delivery_queue.empty():
+                try:
+                    reminders = self._delivery_queue.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+                try:
+                    self._deliver(reminders)
+                except Exception:
+                    _LOG.exception("Reminder delivery worker failed")
+                finally:
+                    self._delivery_queue.task_done()
+        finally:
+            # ROBUSTNESS: Closing happens only after the scheduler has stopped
+            # producing and this worker has drained every queued reminder batch.
             self.notifier.close()

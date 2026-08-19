@@ -18,7 +18,16 @@
 
 <header>
   <div><h1><img src="/static/icons/calendar.svg" style="width:24px;height:24px;">TapTap</h1></div>
-  <div style="display:flex;align-items:center;gap:12px;">
+  <div class="header-actions" style="display:flex;align-items:center;gap:12px;">
+    <label id="autostart-control" class="autostart-control" hidden
+           title="Launch TapTap in the notification area when you sign in to Windows">
+      <input id="autostart-toggle" type="checkbox">
+      <span>Start with Windows</span>
+    </label>
+    <span id="autostart-status" class="visually-hidden" aria-live="polite"></span>
+    <button type="button" id="shortcuts-button" class="btn btn-default btn-sm shortcuts-button"
+            aria-haspopup="dialog" aria-expanded="false" aria-controls="shortcuts-dialog"
+            aria-keyshortcuts="Shift+/" title="Keyboard shortcuts (Shift+/)">Shortcuts</button>
     <span id="mode-switch">
       <button id="mode-light" onclick="setMode('light')"><img src="/static/icons/sun.svg" class="icon"> Light</button>
       <button id="mode-dark" onclick="setMode('dark')"><img src="/static/icons/moon.svg" class="icon"> Dark</button>
@@ -33,7 +42,11 @@
   <div id="form-card">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
       <h2 id="form-title" style="margin-bottom:0;"><img src="/static/icons/plus.svg" class="icon"> Add New Event</h2>
-      <button class="btn btn-success btn-sm" onclick="loadEvents(); showToast('Refreshed', 2000);" title="Reload event list" style="min-width:110px;padding:7px 14px;">Refresh</button>
+      <button class="btn btn-success btn-sm" onclick="refreshEventData()"
+              aria-keyshortcuts="Control+R Meta+R"
+              data-shortcut-title="Refresh event data ({primary}+R)"
+              title="Refresh event data (Ctrl+R)"
+              style="min-width:110px;padding:7px 14px;">Refresh</button>
     </div>
     <input type="hidden" id="edit-id">
     <div class="form-grid">
@@ -54,10 +67,20 @@
         <input id="ev-time" type="time">
       </div>
       <div>
-        <label>Category</label>
+        <label for="category-select-button">Category</label>
         <div class="category-select-wrap">
-          <img class="category-select-icon" src="/static/icons/circle-outline.svg?v={{ asset_version }}" alt="" aria-hidden="true">
-          <select id="ev-category" onchange="toggleCustomCat()">
+          <button type="button" id="category-select-button" class="category-select-button"
+                  aria-haspopup="listbox" aria-expanded="false"
+                  aria-controls="category-select-menu" aria-label="Category: None">
+            <img class="category-select-icon" src="/static/icons/circle-outline.svg?v={{ asset_version }}" alt="" aria-hidden="true">
+            <span id="category-select-value" class="category-select-value">None</span>
+            <span class="category-select-chevron" aria-hidden="true"></span>
+          </button>
+          <div id="category-select-menu" class="category-select-menu"
+               role="listbox" aria-label="Category" hidden></div>
+          <!-- COMPATIBILITY: Existing save/edit code keeps this as its value source. -->
+          <select id="ev-category" class="category-native-select" hidden
+                  aria-hidden="true" tabindex="-1" onchange="toggleCustomCat()">
             <option value="">None</option>
             <option value="work">Work</option>
             <option value="personal">Personal</option>
@@ -76,38 +99,62 @@
         <input id="ev-reminder" type="text" value="15" placeholder="e.g. 60, 30, 10">
       </div>
       <div>
-        <label>Recurrence</label>
-        <select id="ev-recurrence" onchange="toggleCustomRecur()">
-          <option value="none">None</option>
-          <option value="daily">Daily</option>
-          <option value="weekly">Weekly</option>
-          <option value="monthly">Monthly</option>
-          <option value="yearly">Yearly</option>
-          <option value="custom">Custom…</option>
-        </select>
+        <label for="recurrence-select-button">Recurrence</label>
+        <div class="personalized-select-wrap" data-select-id="ev-recurrence">
+          <button type="button" class="personalized-select-button" id="recurrence-select-button"
+                  aria-haspopup="listbox" aria-expanded="false" aria-label="Recurrence: None">
+            <span class="personalized-select-value">None</span>
+            <span class="personalized-select-chevron" aria-hidden="true"></span>
+          </button>
+          <div class="personalized-select-menu" role="listbox" aria-label="Recurrence" hidden></div>
+          <select id="ev-recurrence" class="personalized-native-select" hidden
+                  aria-hidden="true" tabindex="-1" onchange="toggleCustomRecur()">
+            <option value="none">None</option>
+            <option value="daily">Daily</option>
+            <option value="weekly">Weekly</option>
+            <option value="monthly">Monthly</option>
+            <option value="yearly">Yearly</option>
+            <option value="custom">Custom…</option>
+          </select>
+        </div>
       </div>
       <div id="custom-recur" style="display:none;">
         <label>Every</label>
         <div style="display:flex;gap:8px;max-width:200px;">
           <input id="custom-n" type="number" value="2" min="1" max="365" style="width:60px;">
-          <select id="custom-unit">
-            <option value="days">Days</option>
-            <option value="weeks">Weeks</option>
-            <option value="months">Months</option>
-            <option value="years">Years</option>
-          </select>
+          <div class="personalized-select-wrap" data-select-id="custom-unit">
+            <button type="button" class="personalized-select-button"
+                    aria-haspopup="listbox" aria-expanded="false" aria-label="Every: Days">
+              <span class="personalized-select-value">Days</span>
+              <span class="personalized-select-chevron" aria-hidden="true"></span>
+            </button>
+            <div class="personalized-select-menu" role="listbox" aria-label="Every" hidden></div>
+            <select id="custom-unit" class="personalized-native-select" hidden aria-hidden="true" tabindex="-1">
+              <option value="days">Days</option>
+              <option value="weeks">Weeks</option>
+              <option value="months">Months</option>
+              <option value="years">Years</option>
+            </select>
+          </div>
         </div>
       </div>
     </div>
     <div class="form-actions">
-      <button class="btn btn-default" id="btn-cancel" style="display:none" onclick="cancelEdit()" title="Discard changes and return to add mode"><img src="/static/icons/x.svg" class="icon"> Cancel</button>
-      <button class="btn btn-primary" id="btn-save" onclick="saveEvent()" title="Save this event to your reminder list"><img src="/static/icons/plus-white.svg" class="icon"> Add Event</button>
+      <button class="btn btn-default" id="btn-cancel" style="display:none" onclick="cancelEdit()"
+              aria-keyshortcuts="Escape" title="Discard changes and return to add mode (Esc)"><img src="/static/icons/x.svg" class="icon"> Cancel</button>
+      <button class="btn btn-primary" id="btn-save" onclick="saveEvent()"
+              aria-keyshortcuts="Control+S Meta+S"
+              data-shortcut-title="Save this event ({primary}+S)"
+              title="Save this event (Ctrl+S)"><img src="/static/icons/plus-white.svg" class="icon"> Add Event</button>
     </div>
   </div>
 
   <!-- Events -->
   <div style="display:flex;justify-content:flex-end;margin-bottom:12px;">
-    <button id="history-toggle" class="btn btn-default btn-sm" onclick="toggleHistory()" style="min-width:120px;">
+    <button id="history-toggle" class="btn btn-default btn-sm" onclick="toggleHistory()"
+            aria-keyshortcuts="Alt+P"
+            data-shortcut-title="Open or close Past Events ({alt}+P)"
+            title="Open or close Past Events (Alt+P)" style="min-width:120px;">
       <img src="/static/icons/clock.svg" class="icon"> Past Events
     </button>
   </div>
@@ -127,6 +174,40 @@
     <span id="selected-count" style="font-size:0.82rem;color:var(--text-dim);"></span>
   </div>
   <div id="history-list" style="display:flex;flex-direction:column;gap:8px;"></div>
+</div>
+
+<div id="shortcuts-dialog" class="shortcuts-overlay" role="dialog" aria-modal="true"
+     aria-labelledby="shortcuts-title" aria-describedby="shortcuts-description" hidden>
+  <div class="shortcuts-panel" role="document">
+    <div class="shortcuts-header">
+      <div>
+        <h2 id="shortcuts-title">Shortcuts</h2>
+        <p id="shortcuts-description">Use these fixed shortcuts anywhere in TapTap unless noted.</p>
+      </div>
+      <button type="button" id="shortcuts-close" class="btn btn-default btn-sm">Close</button>
+    </div>
+
+    <h3>TapTap</h3>
+    <dl class="shortcuts-list">
+      <div class="shortcut-row"><dt><kbd data-primary-key="N">Ctrl+N</kbd></dt><dd>Start a new event</dd></div>
+      <div class="shortcut-row"><dt><kbd data-primary-key="S">Ctrl+S</kbd></dt><dd>Add or save the current event</dd></div>
+      <div class="shortcut-row"><dt><kbd data-primary-key="R">Ctrl+R</kbd></dt><dd>Refresh event data without reloading TapTap</dd></div>
+      <div class="shortcut-row"><dt><kbd data-alt-key="P">Alt+P</kbd></dt><dd>Open or close Past Events when not typing</dd></div>
+      <div class="shortcut-row"><dt><kbd data-primary-key="Z">Ctrl+Z</kbd></dt><dd>Restore the latest available deletion outside text fields</dd></div>
+      <div class="shortcut-row"><dt><kbd>Shift+/</kbd></dt><dd>Open or close this list</dd></div>
+      <div class="shortcut-row"><dt><kbd>Esc</kbd></dt><dd>Close an open panel or cancel the current form</dd></div>
+    </dl>
+
+    <h3>Choice menus</h3>
+    <dl class="shortcuts-list">
+      <div class="shortcut-row"><dt><kbd>Enter</kbd> <kbd>Space</kbd> <kbd>↑</kbd> <kbd>↓</kbd></dt><dd>Open and navigate choices</dd></div>
+      <div class="shortcut-row"><dt><kbd>Home</kbd> <kbd>End</kbd></dt><dd>Move to the first or last choice</dd></div>
+      <div class="shortcut-row"><dt><kbd>Enter</kbd> <kbd>Space</kbd></dt><dd>Select a choice</dd></div>
+      <div class="shortcut-row"><dt><kbd>Esc</kbd> <kbd>Tab</kbd></dt><dd>Close the choice menu</dd></div>
+    </dl>
+
+    <p class="shortcuts-note">Enter behaves normally in form fields. Use the save shortcut or button when the event is ready.</p>
+  </div>
 </div>
 
 <div id="status"><span class="dot"></span> Ready</div>

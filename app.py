@@ -20,6 +20,12 @@ from platformdirs import user_data_dir, user_log_dir
 
 from database import EventDB
 from reminders import NativeNotifier, ReminderEngine, ReminderWorker
+from windows_integration import (
+    AutostartError,
+    AutostartManager,
+    WindowsDesktopLifecycle,
+    activate_existing_window,
+)
 
 # PyInstaller's no-console mode sets these to None on Windows and macOS.
 # Supplying a sink keeps argparse and defensive print calls well-behaved.
@@ -47,7 +53,8 @@ _LOG_DIR = Path(
 _API_TOKEN = secrets.token_urlsafe(32)
 _DESKTOP_MODE = False
 # INVARIANT (cache): Increment this whenever templates, JS, CSS, or icons change.
-_ASSET_VERSION = "20260807-4"
+_ASSET_VERSION = "20260819-5"
+autostart_manager = AutostartManager()
 
 app = Flask(
     __name__,
@@ -249,6 +256,23 @@ def api_time():
         "timestamp": now.timestamp(),
     })
 
+
+@app.route("/api/settings/autostart", methods=["GET", "PUT"])
+def api_autostart():
+    """Read or update TapTap's per-user Windows sign-in registration."""
+    try:
+        if request.method == "PUT":
+            data = request.get_json(silent=True)
+            if not isinstance(data, dict) or not isinstance(data.get("enabled"), bool):
+                return jsonify({"error": "enabled must be true or false"}), 400
+            status = autostart_manager.set_enabled(data["enabled"])
+        else:
+            status = autostart_manager.status()
+        return jsonify(status.as_dict())
+    except AutostartError as exc:
+        logging.warning("Could not update TapTap autostart: %s", exc)
+        return jsonify({"error": str(exc)}), 500
+
 # ── Entry point ────────────────────────────────────────────────────────────
 
 def _configure_logging() -> None:
@@ -297,7 +321,7 @@ def _desktop_icon_path(platform_name: str | None = None) -> str:
     return os.path.join(_BASE_DIR, "static", filename)
 
 
-def _run_desktop(debug: bool = False) -> None:
+def _run_desktop(debug: bool = False, start_hidden: bool = False) -> None:
     global _DESKTOP_MODE
 
     import webview
@@ -309,7 +333,7 @@ def _run_desktop(debug: bool = False) -> None:
     icon_path = _desktop_icon_path()
 
     webview.settings["OPEN_EXTERNAL_LINKS_IN_BROWSER"] = True
-    webview.create_window(
+    window = webview.create_window(
         "TapTap",
         app,
         width=1100,
@@ -317,14 +341,26 @@ def _run_desktop(debug: bool = False) -> None:
         min_size=(800, 600),
         background_color="#f4f7f8",
         text_select=True,
+        hidden=start_hidden,
+        focus=not start_hidden,
     )
-    webview.start(
-        debug=debug,
-        gui="qt" if sys.platform.startswith("linux") else None,
-        private_mode=False,
-        storage_path=str(storage_path),
-        icon=icon_path if os.path.exists(icon_path) else None,
+    lifecycle = (
+        WindowsDesktopLifecycle(window, icon_path, started_hidden=start_hidden)
+        if sys.platform == "win32"
+        else None
     )
+    try:
+        webview.start(
+            func=lifecycle.start if lifecycle is not None else None,
+            debug=debug,
+            gui="qt" if sys.platform.startswith("linux") else None,
+            private_mode=False,
+            storage_path=str(storage_path),
+            icon=icon_path if os.path.exists(icon_path) else None,
+        )
+    finally:
+        if lifecycle is not None:
+            lifecycle.stop()
 
 
 def _run_browser_mode(debug: bool = False, open_window: bool = True) -> None:
@@ -389,6 +425,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--debug", action="store_true", help="enable webview debugging")
     parser.add_argument(
+        "--startup",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
         "--no-open",
         action="store_true",
         help=argparse.SUPPRESS,
@@ -402,6 +443,12 @@ def main(argv: list[str] | None = None) -> int:
         instance_lock = FileLock(str(_DATA_DIR / "TapTap.lock"))
         instance_lock.acquire(timeout=0)
     except Timeout:
+        if args.startup:
+            logging.info("Ignoring duplicate Windows startup launch")
+            return 0
+        if activate_existing_window():
+            logging.info("Activated the existing TapTap window")
+            return 0
         _show_message("TapTap", "TapTap is already running.")
         return 0
     except Exception as exc:
@@ -413,6 +460,16 @@ def main(argv: list[str] | None = None) -> int:
 
     worker_started = False
     try:
+        try:
+            # COMPATIBILITY: Repair only an existing opt-in registration, so a
+            # normal launch never creates a Windows startup entry by itself.
+            if autostart_manager.repair_if_registered():
+                logging.info("Updated the Windows startup entry for this executable")
+        except AutostartError:
+            # A stale startup entry must not stop reminders from running. The UI
+            # exposes the registration error when the user next changes the toggle.
+            logging.exception("Could not repair the Windows startup entry")
+
         _initialize_runtime()
         assert reminder_worker is not None
         reminder_worker.start()
@@ -420,7 +477,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.browser:
             _run_browser_mode(debug=args.debug, open_window=not args.no_open)
         else:
-            _run_desktop(debug=args.debug)
+            _run_desktop(
+                debug=args.debug,
+                start_hidden=args.startup and sys.platform == "win32",
+            )
     except KeyboardInterrupt:
         pass
     except Exception as exc:

@@ -5,12 +5,17 @@ import os
 import sys
 from glob import glob
 
+from PyInstaller.utils.hooks import collect_data_files
+
 _base = SPECPATH
 
 # PACKAGING: Collect complete UI trees so future assets are not silently omitted.
 added_files = [
     (os.path.join(_base, "templates"), "templates"),
     (os.path.join(_base, "static"), "static"),
+    # desktop-notifier loads its default icon through importlib.resources while
+    # importing. PyInstaller cannot infer that package/data dependency.
+    *collect_data_files("desktop_notifier", includes=["resources/*"]),
 ]
 bundled_binaries = []
 
@@ -36,6 +41,7 @@ hidden_imports = [
     "sqlite3",
     "filelock",
     "platformdirs",
+    "desktop_notifier.resources",
 ]
 
 # PACKAGING: SSL and Bottle's optional adapters are unused by this loopback app.
@@ -141,7 +147,7 @@ if sys.platform == "darwin":
         icon=os.path.join(_base, "static", "app-icon.png"),
         bundle_identifier="com.taptap.reminders",
         info_plist={
-            "CFBundleShortVersionString": "0.2.1",
+            "CFBundleShortVersionString": "0.3.0",
             "NSHighResolutionCapable": True,
         },
     )
