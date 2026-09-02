@@ -4,7 +4,7 @@ import asyncio
 import tempfile
 import threading
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from database import EventDB
@@ -30,6 +30,54 @@ class SlowAsyncNotifier:
         await asyncio.sleep(10)
 
 
+class ImmediateAsyncNotifier:
+    def __init__(self) -> None:
+        self.sent: list[dict] = []
+
+    async def send(self, **kwargs) -> None:
+        self.sent.append(kwargs)
+        callback = kwargs.get("on_dispatched")
+        if callback:
+            callback()
+
+
+class DeniedAsyncNotifier(ImmediateAsyncNotifier):
+    async def request_authorisation(self) -> bool:
+        return False
+
+    async def has_authorisation(self) -> bool:
+        return False
+
+
+class SilentAsyncNotifier:
+    def __init__(self) -> None:
+        self.sent = 0
+
+    async def request_authorisation(self) -> bool:
+        return True
+
+    async def has_authorisation(self) -> bool:
+        return True
+
+    async def send(self, **kwargs) -> None:
+        del kwargs
+        self.sent += 1
+
+
+class FlakyNativeNotifier(NativeNotifier):
+    def __init__(self, failures: int, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.failures = failures
+        self.attempts = 0
+        self.backend = ImmediateAsyncNotifier()
+
+    def _create_backend(self):
+        self.attempts += 1
+        if self.attempts <= self.failures:
+            raise RuntimeError("temporary backend failure")
+        return self.backend, None
+
+
 class BlockingNotifier:
     def __init__(self) -> None:
         self.started = threading.Event()
@@ -47,19 +95,19 @@ class BlockingNotifier:
 
 
 class RecordingEngine:
-    def __init__(self) -> None:
+    def __init__(self, delegate: ReminderEngine) -> None:
+        self.delegate = delegate
+        self.database = delegate.database
         self.calls = 0
         self.second_check = threading.Event()
         self._lock = threading.Lock()
 
     def process_due(self, now: datetime | None = None) -> list[dict]:
-        del now
         with self._lock:
             self.calls += 1
-            if self.calls == 1:
-                return [{"title": "Boundary", "message": "On time", "id": 1}]
-            self.second_check.set()
-            return []
+            if self.calls >= 2:
+                self.second_check.set()
+        return self.delegate.process_due(now)
 
 
 class ReminderEngineTests(unittest.TestCase):
@@ -136,6 +184,8 @@ class ReminderEngineTests(unittest.TestCase):
         self.assertEqual(event["event_date"], "2030-01-03")
         self.assertEqual(event["last_reminded"], None)
         self.assertEqual(event["active"], 1)
+        self.assertEqual(event["schedule_revision"], 1)
+        self.assertEqual(self.db.pending_delivery_count(), 1)
 
     def test_long_overdue_recurrence_skips_directly_to_the_future(self) -> None:
         event_id = self.add_event(
@@ -198,6 +248,62 @@ class ReminderEngineTests(unittest.TestCase):
         self.assertEqual(worker.drain_pending(), queued)
         self.assertEqual(worker.drain_pending(), [])
 
+    def test_failed_delivery_survives_restart_and_retries(self) -> None:
+        self.add_event(reminder_min="30")
+        fallback_calls: list[str] = []
+        first_worker = ReminderWorker(
+            self.engine,
+            notifier=FakeNotifier(result=False),
+            fallback_alert=lambda: fallback_calls.append("alerted"),
+        )
+
+        failed = first_worker.process_once(datetime(2030, 1, 2, 11, 35))
+
+        self.assertFalse(failed[0]["native_notified"])
+        self.assertEqual(self.db.pending_delivery_count(), 1)
+        self.assertEqual(fallback_calls, ["alerted"])
+        pending = self.db.get_due_deliveries(now=datetime.now())
+        self.assertEqual(pending, [])  # The first retry respects its cooldown.
+
+        second_worker = ReminderWorker(
+            ReminderEngine(EventDB(self.db.db_path)),
+            notifier=FakeNotifier(result=True),
+            fallback_alert=lambda: fallback_calls.append("duplicate"),
+        )
+        delivered = second_worker._deliver_due(
+            now=datetime.now() + timedelta(seconds=6)
+        )
+
+        self.assertTrue(delivered[0]["native_notified"])
+        self.assertEqual(self.db.pending_delivery_count(), 0)
+        self.assertEqual(fallback_calls, ["alerted"])
+
+    def test_shutdown_leaves_blocked_delivery_durable(self) -> None:
+        now = datetime.now()
+        self.add_event(
+            name="Shutdown",
+            event_date=now.strftime("%Y-%m-%d"),
+            event_time=now.strftime("%H:%M"),
+            reminder_min="0",
+        )
+        notifier = BlockingNotifier()
+        worker = ReminderWorker(
+            self.engine,
+            notifier=notifier,
+            interval=0.25,
+            fallback_alert=lambda: None,
+        )
+
+        worker.start()
+        self.assertTrue(notifier.started.wait(timeout=2))
+        worker.stop(timeout=0.1)
+
+        self.assertTrue(worker._delivery_thread.is_alive())
+        self.assertEqual(self.db.pending_delivery_count(), 1)
+        notifier.release.set()
+        worker._delivery_thread.join(timeout=2)
+        self.assertFalse(worker._delivery_thread.is_alive())
+
     def test_worker_wait_is_aligned_to_wall_clock_boundaries(self) -> None:
         worker = ReminderWorker(
             self.engine,
@@ -210,7 +316,14 @@ class ReminderEngineTests(unittest.TestCase):
         self.assertAlmostEqual(worker._seconds_until_next_tick(101.999), 0.001)
 
     def test_slow_notification_does_not_block_timing_checks(self) -> None:
-        engine = RecordingEngine()
+        now = datetime.now()
+        self.add_event(
+            name="Boundary",
+            event_date=now.strftime("%Y-%m-%d"),
+            event_time=now.strftime("%H:%M"),
+            reminder_min="0",
+        )
+        engine = RecordingEngine(self.engine)
         notifier = BlockingNotifier()
         worker = ReminderWorker(engine, notifier=notifier, interval=0.25)
 
@@ -247,6 +360,82 @@ class ReminderEngineTests(unittest.TestCase):
         notifier.close()
         self.assertIsNone(notifier._loop)
         self.assertIsNone(notifier._notifier)
+
+    def test_native_notification_permission_denial_is_a_failure(self) -> None:
+        backend = DeniedAsyncNotifier()
+        notifier = NativeNotifier()
+        notifier._loop = asyncio.new_event_loop()
+        notifier._notifier = backend
+
+        with self.assertLogs("reminders", level="ERROR"):
+            delivered = notifier.send("Denied", "Use the fallback")
+
+        self.assertFalse(delivered)
+        self.assertEqual(backend.sent, [])
+        self.assertEqual(notifier.snapshot()["state"], "retrying")
+
+    def test_native_notification_requires_dispatch_confirmation(self) -> None:
+        backend = SilentAsyncNotifier()
+        notifier = NativeNotifier()
+        notifier._loop = asyncio.new_event_loop()
+        notifier._notifier = backend
+
+        with self.assertLogs("reminders", level="ERROR"):
+            delivered = notifier.send("Silent failure", "Retry this")
+
+        self.assertFalse(delivered)
+        self.assertEqual(backend.sent, 1)
+        self.assertEqual(notifier.snapshot()["state"], "retrying")
+
+    def test_native_notification_initialization_recovers_after_cooldown(self) -> None:
+        clock = [100.0]
+        notifier = FlakyNativeNotifier(
+            failures=1,
+            initial_retry_delay=5,
+            max_retry_delay=20,
+            monotonic=lambda: clock[0],
+        )
+
+        with self.assertLogs("reminders", level="ERROR"):
+            self.assertFalse(notifier.send("First", "Fallback"))
+        self.assertEqual(notifier.attempts, 1)
+        self.assertEqual(notifier.snapshot()["state"], "retrying")
+        self.assertEqual(notifier.snapshot()["retry_in_seconds"], 5)
+
+        clock[0] = 104.9
+        self.assertFalse(notifier.send("Too early", "Fallback"))
+        self.assertEqual(notifier.attempts, 1)
+
+        clock[0] = 105.0
+        self.assertTrue(notifier.send("Recovered", "Delivered"))
+        self.assertEqual(notifier.attempts, 2)
+        self.assertEqual(notifier.snapshot()["state"], "ready")
+        self.assertEqual(len(notifier.backend.sent), 1)
+        notifier.close()
+
+    def test_native_notification_initialization_uses_bounded_backoff(self) -> None:
+        clock = [0.0]
+        notifier = FlakyNativeNotifier(
+            failures=3,
+            initial_retry_delay=2,
+            max_retry_delay=4,
+            monotonic=lambda: clock[0],
+        )
+
+        with self.assertLogs("reminders", level="ERROR"):
+            self.assertFalse(notifier.send("One", "Fallback"))
+            clock[0] = 1.0
+            self.assertFalse(notifier.send("Suppressed", "Fallback"))
+            clock[0] = 2.0
+            self.assertFalse(notifier.send("Two", "Fallback"))
+            clock[0] = 5.9
+            self.assertFalse(notifier.send("Still suppressed", "Fallback"))
+            clock[0] = 6.0
+            self.assertFalse(notifier.send("Three", "Fallback"))
+
+        self.assertEqual(notifier.attempts, 3)
+        self.assertEqual(notifier.snapshot()["retry_in_seconds"], 4)
+        notifier.close()
 
 
 if __name__ == "__main__":

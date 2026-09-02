@@ -5,17 +5,35 @@ from __future__ import annotations
 import ctypes
 from dataclasses import dataclass
 import logging
+import os
 import subprocess
 import sys
 import threading
 import time
-from typing import Any
+from typing import Any, Callable
 
 
 _LOG = logging.getLogger(__name__)
 _RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 _RUN_VALUE_NAME = "TapTap"
 _RUN_COMMAND_LIMIT = 260
+
+
+def _startup_executable(command: str) -> str | None:
+    """Extract the executable from TapTap's narrowly defined Run command."""
+    value = command.strip()
+    suffix = "--startup"
+    if not value.lower().endswith(suffix):
+        return None
+    executable = value[: -len(suffix)].rstrip()
+    if executable.startswith('"'):
+        if len(executable) < 2 or not executable.endswith('"'):
+            return None
+        executable = executable[1:-1]
+    elif any(character.isspace() for character in executable):
+        # Windows requires executable paths containing spaces to be quoted.
+        return None
+    return executable or None
 
 
 class AutostartError(RuntimeError):
@@ -55,6 +73,7 @@ class AutostartManager:
         executable: str | None = None,
         value_name: str = _RUN_VALUE_NAME,
         registry: Any | None = None,
+        path_exists: Callable[[str], bool] | None = None,
     ) -> None:
         self.platform_name = platform_name or sys.platform
         self.frozen = (
@@ -63,6 +82,7 @@ class AutostartManager:
         self.executable = executable or sys.executable
         self.value_name = value_name
         self._registry_override = registry
+        self._path_exists = path_exists or os.path.isfile
 
     @property
     def supported(self) -> bool:
@@ -128,11 +148,26 @@ class AutostartManager:
         current = self._read_registered_command()
         registered = current is not None
         matches = current == self.command
+        registered_executable = (
+            _startup_executable(current) if current is not None else None
+        )
+        target_exists = bool(
+            registered_executable and self._path_exists(registered_executable)
+        )
+        reason = None
+        if registered and not matches:
+            reason = (
+                "Start with Windows points to another existing TapTap copy; "
+                "TapTap left it unchanged."
+                if target_exists
+                else "The registered TapTap copy could not be found."
+            )
         return AutostartStatus(
             supported=True,
             enabled=registered,
             registered=registered,
-            needs_repair=registered and not matches,
+            needs_repair=registered and not matches and not target_exists,
+            reason=reason,
         )
 
     def _write_current_command(self) -> None:
@@ -179,11 +214,18 @@ class AutostartManager:
         return self.status()
 
     def repair_if_registered(self) -> bool:
-        """Point an existing opt-in entry at a manually moved executable."""
+        """Repair a stale opt-in entry without taking over from a valid copy."""
         if not self.supported:
             return False
         current = self._read_registered_command()
         if current is None or current == self.command:
+            return False
+        registered_executable = _startup_executable(current)
+        if registered_executable and self._path_exists(registered_executable):
+            _LOG.warning(
+                "Preserving Windows startup entry owned by existing executable: %s",
+                registered_executable,
+            )
             return False
         self._write_current_command()
         return True
@@ -226,20 +268,146 @@ def activate_existing_window(
         time.sleep(0.1)
 
 
+class PywebviewWinFormsAdapter:
+    """Contain the small private pywebview surface needed by TapTap's tray."""
+
+    EXPECTED_VERSION = "6.2.x"
+
+    def __init__(self, window: Any, *, backend: Any | None = None) -> None:
+        if backend is None:
+            from webview.platforms import winforms as backend
+
+        self.backend = backend
+        try:
+            forms = backend.WinForms
+            form = backend.BrowserView.instances.get(window.uid)
+            required_controls = (
+                "CloseReason",
+                "ContextMenuStrip",
+                "FormWindowState",
+                "MouseButtons",
+                "NotifyIcon",
+                "ToolStripMenuItem",
+                "ToolStripSeparator",
+                "ToolTipIcon",
+            )
+            missing = [name for name in required_controls if not hasattr(forms, name)]
+            if missing:
+                raise AttributeError(", ".join(missing))
+            if not hasattr(backend, "Icon") or not hasattr(backend, "Func"):
+                raise AttributeError("Icon/Func")
+        except (AttributeError, TypeError) as exc:
+            raise RuntimeError(
+                "TapTap requires pywebview's Windows backend layout from "
+                f"pywebview {self.EXPECTED_VERSION}; the installed backend is incompatible."
+            ) from exc
+        if form is None:
+            raise RuntimeError("TapTap's WinForms window is unavailable")
+        self.form = form
+
+    def invoke(self, callback: Callable[[], None]) -> None:
+        if self.form.InvokeRequired:
+            self.form.Invoke(self.backend.Func[self.backend.Type](callback))
+        else:
+            callback()
+
+    def create_tray(
+        self,
+        icon_path: str,
+        *,
+        tray_text: str,
+        on_open: Callable[..., None],
+        on_quit: Callable[..., None],
+        on_mouse_click: Callable[..., None],
+        on_form_closing: Callable[..., None],
+        on_form_closed: Callable[..., None],
+    ) -> tuple[Any, Any, Any]:
+        forms = self.backend.WinForms
+        tray = forms.NotifyIcon()
+        icon = self.backend.Icon(icon_path)
+        menu = forms.ContextMenuStrip()
+        open_item = forms.ToolStripMenuItem("Open TapTap")
+        quit_item = forms.ToolStripMenuItem("Quit TapTap")
+        open_item.Click += on_open
+        quit_item.Click += on_quit
+        menu.Items.Add(open_item)
+        menu.Items.Add(forms.ToolStripSeparator())
+        menu.Items.Add(quit_item)
+        tray.Icon = icon
+        tray.Text = tray_text
+        tray.ContextMenuStrip = menu
+        tray.MouseClick += on_mouse_click
+        tray.Visible = True
+
+        # pywebview's default handler exits on a user close. TapTap replaces it
+        # so only that close reason hides the window; system termination remains.
+        self.form.FormClosing -= self.form.on_closing
+        self.form.FormClosing += on_form_closing
+        self.form.FormClosed += on_form_closed
+        return tray, menu, icon
+
+    def show_form(self) -> None:
+        forms = self.backend.WinForms
+        self.form.Show()
+        if self.form.WindowState == forms.FormWindowState.Minimized:
+            self.form.WindowState = forms.FormWindowState.Normal
+        self.form.Activate()
+        self.form.BringToFront()
+
+    def is_left_click(self, args: Any) -> bool:
+        return args.Button == self.backend.WinForms.MouseButtons.Left
+
+    def is_user_close(self, args: Any) -> bool:
+        return args.CloseReason == self.backend.WinForms.CloseReason.UserClosing
+
+    def close_form(self, if_disposed: Callable[[], None]) -> None:
+        if not self.form.IsDisposed:
+            self.form.Close()
+        else:
+            if_disposed()
+
+    def show_background_hint(self, tray: Any) -> None:
+        tray.ShowBalloonTip(
+            3000,
+            "TapTap is still running",
+            "Reminders will continue in the background. Use the tray icon to open or quit TapTap.",
+            self.backend.WinForms.ToolTipIcon.Info,
+        )
+
+    @staticmethod
+    def dispose_controls(tray: Any, menu: Any, icon: Any) -> None:
+        if tray is not None:
+            tray.Visible = False
+            tray.Dispose()
+        if menu is not None:
+            menu.Dispose()
+        if icon is not None:
+            icon.Dispose()
+
+
 class WindowsDesktopLifecycle:
     """Keep a pywebview WinForms window alive behind a native tray icon."""
 
-    def __init__(self, window: Any, icon_path: str, *, started_hidden: bool) -> None:
+    def __init__(
+        self,
+        window: Any,
+        icon_path: str,
+        *,
+        started_hidden: bool,
+        tray_text: str = "TapTap",
+        adapter_factory: Callable[[Any], PywebviewWinFormsAdapter] = PywebviewWinFormsAdapter,
+    ) -> None:
         self.window = window
         self.icon_path = icon_path
         self.started_hidden = started_hidden
+        self.tray_text = tray_text
+        self._adapter_factory = adapter_factory
         self._quitting = threading.Event()
         self._ready = threading.Event()
-        self._form = None
         self._tray = None
         self._menu = None
         self._icon = None
-        self._backend = None
+        self._adapter = None
         self._close_hint_shown = False
 
     @property
@@ -252,41 +420,19 @@ class WindowsDesktopLifecycle:
             if not self.window.events.shown.wait(15):
                 raise RuntimeError("TapTap's native window was not created")
 
-            from webview.platforms import winforms as backend
-
-            self._backend = backend
-            form = backend.BrowserView.instances.get(self.window.uid)
-            if form is None:
-                raise RuntimeError("TapTap's WinForms window is unavailable")
-            self._form = form
+            self._adapter = self._adapter_factory(self.window)
 
             def configure() -> None:
-                tray = backend.WinForms.NotifyIcon()
-                icon = backend.Icon(self.icon_path)
-                menu = backend.WinForms.ContextMenuStrip()
-                open_item = backend.WinForms.ToolStripMenuItem("Open TapTap")
-                quit_item = backend.WinForms.ToolStripMenuItem("Quit TapTap")
-                open_item.Click += self._on_open
-                quit_item.Click += self._on_quit
-                menu.Items.Add(open_item)
-                menu.Items.Add(backend.WinForms.ToolStripSeparator())
-                menu.Items.Add(quit_item)
-                tray.Icon = icon
-                tray.Text = "TapTap"
-                tray.ContextMenuStrip = menu
-                tray.MouseClick += self._on_tray_mouse_click
-                tray.Visible = True
-
-                # INVARIANT: Replace pywebview's generic close handler so user close hides the
-                # form, while sign-out, shutdown, Task Manager, and explicit Quit
-                # retain their native close semantics.
-                form.FormClosing -= form.on_closing
-                form.FormClosing += self._on_form_closing
-                form.FormClosed += self._on_form_closed
-
-                self._tray = tray
-                self._menu = menu
-                self._icon = icon
+                assert self._adapter is not None
+                self._tray, self._menu, self._icon = self._adapter.create_tray(
+                    self.icon_path,
+                    tray_text=self.tray_text,
+                    on_open=self._on_open,
+                    on_quit=self._on_quit,
+                    on_mouse_click=self._on_tray_mouse_click,
+                    on_form_closing=self._on_form_closing,
+                    on_form_closed=self._on_form_closed,
+                )
 
             self._invoke(configure)
             self._ready.set()
@@ -304,21 +450,14 @@ class WindowsDesktopLifecycle:
                     _LOG.exception("Could not reveal TapTap after tray startup failed")
 
     def _invoke(self, callback) -> None:
-        if self._form is None or self._backend is None:
+        if self._adapter is None:
             return
-        if self._form.InvokeRequired:
-            self._form.Invoke(self._backend.Func[self._backend.Type](callback))
-        else:
-            callback()
+        self._adapter.invoke(callback)
 
     def _show_form(self) -> None:
-        if self._form is None or self._backend is None:
+        if self._adapter is None:
             return
-        self._form.Show()
-        if self._form.WindowState == self._backend.WinForms.FormWindowState.Minimized:
-            self._form.WindowState = self._backend.WinForms.FormWindowState.Normal
-        self._form.Activate()
-        self._form.BringToFront()
+        self._adapter.show_form()
 
     def _on_open(self, *_args) -> None:
         try:
@@ -328,23 +467,17 @@ class WindowsDesktopLifecycle:
 
     def _on_tray_mouse_click(self, _sender, args) -> None:
         """Open on one left-click while reserving right-click for the menu."""
-        backend = self._backend
         # COMPATIBILITY: Filter the button here instead of using a double-click
         # event; WinForms still needs right-click untouched for ContextMenuStrip.
-        if (
-            backend is not None
-            and args.Button == backend.WinForms.MouseButtons.Left
-        ):
+        if self._adapter is not None and self._adapter.is_left_click(args):
             self._on_open()
 
     def _on_quit(self, *_args) -> None:
         self._quitting.set()
 
         def close() -> None:
-            if self._form is not None and not self._form.IsDisposed:
-                self._form.Close()
-            else:
-                self._dispose_native()
+            if self._adapter is not None:
+                self._adapter.close_form(self._dispose_native)
 
         try:
             self._invoke(close)
@@ -352,27 +485,21 @@ class WindowsDesktopLifecycle:
             _LOG.exception("Could not quit TapTap from the tray")
 
     def _on_form_closing(self, sender, args) -> None:
-        backend = self._backend
         _LOG.info(
             "Windows form closing (reason=%s, quitting=%s)",
             args.CloseReason,
             self._quitting.is_set(),
         )
         if (
-            backend is not None
+            self._adapter is not None
             and not self._quitting.is_set()
-            and args.CloseReason == backend.WinForms.CloseReason.UserClosing
+            and self._adapter.is_user_close(args)
         ):
             args.Cancel = True
             sender.Hide()
             if self._tray is not None and not self._close_hint_shown:
                 self._close_hint_shown = True
-                self._tray.ShowBalloonTip(
-                    3000,
-                    "TapTap is still running",
-                    "Reminders will continue in the background. Use the tray icon to open or quit TapTap.",
-                    backend.WinForms.ToolTipIcon.Info,
-                )
+                self._adapter.show_background_hint(self._tray)
             _LOG.info("TapTap window hidden to the notification area")
             return
 
@@ -391,13 +518,8 @@ class WindowsDesktopLifecycle:
         self._tray = None
         self._menu = None
         self._icon = None
-        if tray is not None:
-            tray.Visible = False
-            tray.Dispose()
-        if menu is not None:
-            menu.Dispose()
-        if icon is not None:
-            icon.Dispose()
+        if self._adapter is not None:
+            self._adapter.dispose_controls(tray, menu, icon)
 
     def stop(self) -> None:
         self._quitting.set()

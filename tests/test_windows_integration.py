@@ -13,7 +13,9 @@ import windows_integration
 from windows_integration import (
     AutostartError,
     AutostartManager,
+    PywebviewWinFormsAdapter,
     WindowsDesktopLifecycle,
+    _startup_executable,
     activate_existing_window,
 )
 
@@ -131,6 +133,7 @@ class WindowsIntegrationTests(unittest.TestCase):
             frozen=True,
             executable=r"D:\Apps\TapTap.exe",
             registry=registry,
+            path_exists=lambda _path: False,
         )
         stale = moved.status()
         self.assertTrue(stale.enabled)
@@ -142,6 +145,52 @@ class WindowsIntegrationTests(unittest.TestCase):
         disabled = moved.set_enabled(False)
         self.assertFalse(disabled.enabled)
         self.assertNotIn("TapTap", registry.values)
+
+    def test_autostart_preserves_an_existing_alternate_copy(self) -> None:
+        registry = _FakeRegistry()
+        registry.key_exists = True
+        registry.values["TapTap"] = (
+            r'"C:\Program Files\TapTap\TapTap.exe" --startup'
+        )
+        manager = AutostartManager(
+            platform_name="win32",
+            frozen=True,
+            executable=r"D:\Downloads\TapTap.exe",
+            registry=registry,
+            path_exists=lambda path: path == r"C:\Program Files\TapTap\TapTap.exe",
+        )
+
+        status = manager.status()
+        self.assertTrue(status.enabled)
+        self.assertFalse(status.needs_repair)
+        self.assertIn("another existing TapTap copy", status.reason or "")
+        self.assertFalse(manager.repair_if_registered())
+        self.assertEqual(
+            registry.values["TapTap"],
+            r'"C:\Program Files\TapTap\TapTap.exe" --startup',
+        )
+
+        # Turning the setting on is an explicit user action and may transfer it.
+        manager.set_enabled(True)
+        self.assertEqual(
+            registry.values["TapTap"], r"D:\Downloads\TapTap.exe --startup"
+        )
+
+    def test_autostart_repairs_missing_and_invalid_targets_only(self) -> None:
+        self.assertEqual(
+            _startup_executable(
+                r'"C:\Program Files\TapTap\TapTap.exe" --startup'
+            ),
+            r"C:\Program Files\TapTap\TapTap.exe",
+        )
+        self.assertEqual(
+            _startup_executable(r"D:\Apps\TapTap.exe --startup"),
+            r"D:\Apps\TapTap.exe",
+        )
+        self.assertIsNone(
+            _startup_executable(r"C:\Program Files\TapTap\TapTap.exe --startup")
+        )
+        self.assertIsNone(_startup_executable(r"D:\Apps\TapTap.exe --other"))
 
     def test_autostart_rejects_an_overlong_run_command(self) -> None:
         registry = _FakeRegistry()
@@ -205,10 +254,9 @@ class WindowsIntegrationTests(unittest.TestCase):
             "unused.ico",
             started_hidden=False,
         )
-        lifecycle._backend = SimpleNamespace(
-            WinForms=SimpleNamespace(
-                CloseReason=SimpleNamespace(UserClosing="user")
-            )
+        lifecycle._adapter = SimpleNamespace(
+            is_user_close=lambda args: args.CloseReason == "user",
+            show_background_hint=Mock(),
         )
         lifecycle._quitting = threading.Event()
         form = _FakeForm()
@@ -230,10 +278,8 @@ class WindowsIntegrationTests(unittest.TestCase):
             "unused.ico",
             started_hidden=True,
         )
-        lifecycle._backend = SimpleNamespace(
-            WinForms=SimpleNamespace(
-                MouseButtons=SimpleNamespace(Left="left")
-            )
+        lifecycle._adapter = SimpleNamespace(
+            is_left_click=lambda args: args.Button == "left"
         )
         lifecycle._on_open = Mock()
 
@@ -244,8 +290,18 @@ class WindowsIntegrationTests(unittest.TestCase):
         lifecycle._on_open.assert_called_once_with()
 
         source = Path(windows_integration.__file__).read_text(encoding="utf-8")
-        self.assertIn("tray.MouseClick += self._on_tray_mouse_click", source)
+        self.assertIn("tray.MouseClick += on_mouse_click", source)
         self.assertNotIn("tray.DoubleClick += self._on_open", source)
+
+    def test_incompatible_pywebview_backend_fails_with_a_clear_message(self) -> None:
+        backend = SimpleNamespace(
+            BrowserView=SimpleNamespace(instances={"window-1": object()}),
+            WinForms=SimpleNamespace(),
+        )
+        window = SimpleNamespace(uid="window-1")
+
+        with self.assertRaisesRegex(RuntimeError, "pywebview 6.2.x"):
+            PywebviewWinFormsAdapter(window, backend=backend)
 
     @unittest.skipUnless(sys.platform == "win32", "Windows registry test")
     def test_real_hkcu_registration_round_trip(self) -> None:

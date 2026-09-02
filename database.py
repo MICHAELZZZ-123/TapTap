@@ -57,8 +57,9 @@ class EventDB:
                     recurrence    TEXT    DEFAULT 'none',
                     category      TEXT    DEFAULT '',
                     active        INTEGER DEFAULT 1,
-                    last_reminded TEXT,  -- ISO datetime when last reminder fired
+                    last_reminded TEXT,  -- claimed offsets for the current occurrence
                     snooze_until  TEXT,  -- ISO datetime; ignore until this time
+                    schedule_revision INTEGER NOT NULL DEFAULT 0,
                     created_at    TEXT    DEFAULT (datetime('now','localtime'))
                 )
                 """
@@ -79,6 +80,41 @@ class EventDB:
                     # migration between the schema check and ALTER statement.
                     if "duplicate column name" not in str(exc).lower():
                         raise
+            if "schedule_revision" not in columns:
+                try:
+                    conn.execute(
+                        "ALTER TABLE events ADD COLUMN "
+                        "schedule_revision INTEGER NOT NULL DEFAULT 0"
+                    )
+                except sqlite3.OperationalError as exc:
+                    if "duplicate column name" not in str(exc).lower():
+                        raise
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS reminder_outbox (
+                    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                    delivery_key      TEXT NOT NULL UNIQUE,
+                    event_id          INTEGER NOT NULL,
+                    occurrence_at     TEXT NOT NULL,
+                    offsets           TEXT NOT NULL,
+                    title             TEXT NOT NULL,
+                    message           TEXT NOT NULL,
+                    state             TEXT NOT NULL DEFAULT 'pending',
+                    attempts          INTEGER NOT NULL DEFAULT 0,
+                    next_attempt_at    TEXT NOT NULL DEFAULT '1970-01-01 00:00:00',
+                    last_attempt_at    TEXT,
+                    delivered_at      TEXT,
+                    last_error         TEXT,
+                    fallback_at       TEXT,
+                    popup_consumed_at TEXT,
+                    created_at        TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_reminder_outbox_due "
+                "ON reminder_outbox(state, next_attempt_at, id)"
+            )
             conn.commit()
 
     # ── CRUD ──────────────────────────────────────────────────────────────
@@ -130,10 +166,17 @@ class EventDB:
                        COALESCE(event_time, '')<>? OR
                        COALESCE(CAST(reminder_min AS TEXT), '')<>? OR
                        COALESCE(recurrence, 'none')<>?
-                     THEN NULL ELSE snooze_until END
+                     THEN NULL ELSE snooze_until END,
+                   schedule_revision=CASE WHEN
+                       COALESCE(event_date, '')<>? OR
+                       COALESCE(event_time, '')<>? OR
+                       COALESCE(CAST(reminder_min AS TEXT), '')<>? OR
+                       COALESCE(recurrence, 'none')<>?
+                     THEN schedule_revision + 1 ELSE schedule_revision END
                    WHERE id=?""",
                 (name, description, event_date, event_time,
                  reminder_min, recurrence, category,
+                 event_date, event_time, str(reminder_min), recurrence,
                  event_date, event_time, str(reminder_min), recurrence,
                  event_date, event_time, str(reminder_min), recurrence,
                  event_id),
@@ -184,11 +227,165 @@ class EventDB:
             )
             conn.commit()
 
+    def claim_delivery(
+        self,
+        event: dict,
+        offsets: list[int],
+        title: str,
+        message: str,
+        *,
+        claimed_at: datetime,
+    ) -> int | None:
+        """Atomically claim due offsets and persist their delivery payload."""
+        normalized = sorted({int(offset) for offset in offsets})
+        if not normalized:
+            return None
+        offsets_text = ",".join(str(offset) for offset in normalized)
+        occurrence_at = f"{event['event_date']} {event['event_time']}"
+        delivery_key = "|".join(
+            (
+                str(event["id"]),
+                str(event.get("schedule_revision") or 0),
+                occurrence_at,
+                offsets_text,
+            )
+        )
+        timestamp = claimed_at.strftime("%Y-%m-%d %H:%M:%S")
+
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT last_reminded FROM events WHERE id=?",
+                (event["id"],),
+            ).fetchone()
+            if not row:
+                return None
+            reminded = set()
+            current = row["last_reminded"] or ""
+            if current:
+                try:
+                    reminded = {int(value) for value in current.split(",") if value.strip()}
+                except ValueError:
+                    reminded = set()
+            reminded.update(normalized)
+
+            cursor = conn.execute(
+                """
+                INSERT OR IGNORE INTO reminder_outbox
+                    (delivery_key, event_id, occurrence_at, offsets, title,
+                     message, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    delivery_key,
+                    event["id"],
+                    occurrence_at,
+                    offsets_text,
+                    title,
+                    message,
+                    timestamp,
+                ),
+            )
+            conn.execute(
+                "UPDATE events SET last_reminded=? WHERE id=?",
+                (
+                    ",".join(str(offset) for offset in sorted(reminded)),
+                    event["id"],
+                ),
+            )
+            conn.commit()
+            return int(cursor.lastrowid) if cursor.rowcount else None
+
+    def get_due_deliveries(
+        self,
+        *,
+        now: datetime | None = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        timestamp = (now or datetime.now()).strftime("%Y-%m-%d %H:%M:%S")
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM reminder_outbox "
+                "WHERE state='pending' AND next_attempt_at<=? "
+                "ORDER BY created_at, id LIMIT ?",
+                (timestamp, max(1, int(limit))),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def mark_delivery_delivered(
+        self,
+        delivery_id: int,
+        *,
+        delivered_at: datetime | None = None,
+    ) -> None:
+        timestamp = (delivered_at or datetime.now()).strftime("%Y-%m-%d %H:%M:%S")
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE reminder_outbox SET state='delivered', "
+                "attempts=attempts+1, last_attempt_at=?, delivered_at=?, "
+                "last_error=NULL WHERE id=?",
+                (timestamp, timestamp, delivery_id),
+            )
+            conn.commit()
+
+    def mark_delivery_failed(
+        self,
+        delivery_id: int,
+        error: str,
+        *,
+        retry_at: datetime,
+        attempted_at: datetime | None = None,
+    ) -> None:
+        attempted = (attempted_at or datetime.now()).strftime("%Y-%m-%d %H:%M:%S")
+        retry = retry_at.strftime("%Y-%m-%d %H:%M:%S")
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE reminder_outbox SET state='pending', attempts=attempts+1, "
+                "last_attempt_at=?, next_attempt_at=?, last_error=? WHERE id=?",
+                (attempted, retry, str(error)[:1000], delivery_id),
+            )
+            conn.commit()
+
+    def mark_delivery_fallback(self, delivery_id: int, *, shown_at: datetime) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE reminder_outbox SET fallback_at=? "
+                "WHERE id=? AND fallback_at IS NULL",
+                (shown_at.strftime("%Y-%m-%d %H:%M:%S"), delivery_id),
+            )
+            conn.commit()
+
+    def consume_delivery_popups(self, limit: int = 100) -> list[dict]:
+        """Return durable in-app fallbacks once, without a bounded memory queue."""
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM reminder_outbox WHERE popup_consumed_at IS NULL "
+                "ORDER BY created_at, id LIMIT ?",
+                (max(1, int(limit)),),
+            ).fetchall()
+            if rows:
+                placeholders = ",".join("?" for _row in rows)
+                conn.execute(
+                    f"UPDATE reminder_outbox SET popup_consumed_at=? "
+                    f"WHERE id IN ({placeholders})",
+                    (timestamp, *(row["id"] for row in rows)),
+                )
+                conn.commit()
+            return [dict(row) for row in rows]
+
+    def pending_delivery_count(self) -> int:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS count FROM reminder_outbox WHERE state='pending'"
+            ).fetchone()
+            return int(row["count"])
+
     def snooze(self, event_id: int, minutes: int = 5):
         with self._connect() as conn:
             conn.execute(
                 "UPDATE events SET snooze_until=datetime('now','localtime', "
-                "? || ' minutes'), last_reminded=NULL, active=1 WHERE id=?",
+                "? || ' minutes'), last_reminded=NULL, active=1, "
+                "schedule_revision=schedule_revision+1 WHERE id=?",
                 (str(minutes), event_id),
             )
             conn.commit()
@@ -230,7 +427,7 @@ class EventDB:
 
             conn.execute(
                 "UPDATE events SET event_date=?, last_reminded=NULL, "
-                "snooze_until=NULL WHERE id=?",
+                "snooze_until=NULL, schedule_revision=schedule_revision+1 WHERE id=?",
                 (nxt.strftime("%Y-%m-%d"), event_id),
             )
             conn.commit()
@@ -248,6 +445,11 @@ class EventDB:
             conn.execute(
                 "DELETE FROM events WHERE active=0 AND "
                 "event_date < date('now','localtime', ?)",
+                (f"-{days} days",),
+            )
+            conn.execute(
+                "DELETE FROM reminder_outbox WHERE state='delivered' AND "
+                "delivered_at < datetime('now','localtime', ?)",
                 (f"-{days} days",),
             )
             conn.commit()

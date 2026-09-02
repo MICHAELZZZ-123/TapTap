@@ -2,6 +2,33 @@
 
 All notable changes to TapTap will be documented in this file.
 
+## [0.3.1] — 2026-09-02
+
+Reliability update focused on durable reminder delivery, clearer Windows
+fallback behavior, and safer portable autostart ownership.
+
+### Changed
+- Reminder claims now create a unique SQLite outbox record transactionally.
+  Pending native deliveries survive restart, retry with bounded backoff, and
+  remain associated with the correct schedule revision when an event recurs or
+  is edited.
+- Windows autostart preserves an existing valid TapTap owner. Opening another
+  portable copy no longer silently replaces that registration.
+
+### Fixed
+- Native delivery is marked successful only after notification authorization
+  and a dispatch callback, instead of trusting a backend call that may swallow
+  an error.
+- A hidden Windows instance now responds to blocked native delivery with a
+  system alert sound, reveals the existing window, and retains a durable in-app
+  popup while continuing to retry the native notification.
+- In-app reminder popups are durable and no longer disappear after an in-memory
+  100-item limit, a crash, a restart, or a delivery thread that outlives Quit's
+  wait deadline.
+- Windows release smoke tests preserve user autostart state and exercise real
+  tray clicks, fallback/outbox behavior, same-process activation, and graceful
+  Quit.
+
 ## [0.3.0] — 2026-08-19
 
 Desktop productivity update focused on dependable Windows background operation,

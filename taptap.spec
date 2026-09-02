@@ -147,7 +147,7 @@ if sys.platform == "darwin":
         icon=os.path.join(_base, "static", "app-icon.png"),
         bundle_identifier="com.taptap.reminders",
         info_plist={
-            "CFBundleShortVersionString": "0.3.0",
+            "CFBundleShortVersionString": "0.3.1",
             "NSHighResolutionCapable": True,
         },
     )

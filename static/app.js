@@ -347,12 +347,15 @@ async function loadAutostartSetting(announce = false) {
     control.hidden = false;
     toggle.checked = status.enabled === true;
     toggle.dataset.enabled = toggle.checked ? 'true' : 'false';
+    const message = status.reason || (toggle.checked
+      ? 'Start with Windows is enabled.'
+      : 'Start with Windows is disabled.');
     if (liveStatus) {
-      liveStatus.textContent = toggle.checked
-        ? 'Start with Windows is enabled.'
-        : 'Start with Windows is disabled.';
+      liveStatus.textContent = message;
     }
-    if (announce) showToast(liveStatus.textContent);
+    control.title = status.reason
+      || 'Launch TapTap in the notification area when you sign in to Windows';
+    if (announce) showToast(message);
   } catch (error) {
     if (liveStatus) liveStatus.textContent = 'Could not read Windows startup settings.';
     control.title = String(error.message || error);
@@ -1332,6 +1335,9 @@ async function pollReminders() {
     const data = await api('GET', '/api/pending');
     const status = document.getElementById('status');
     status.innerHTML = '<span class="dot"></span> ' + data.status;
+    if (data.notification && data.notification.message) {
+      status.appendChild(document.createTextNode(' · ' + data.notification.message));
+    }
     // Feed countdown from the same response (no separate fetch)
     const cd = document.getElementById('countdown');
     cd._nextAt = data.next_at || null;

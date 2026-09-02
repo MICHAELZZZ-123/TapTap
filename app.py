@@ -53,7 +53,7 @@ _LOG_DIR = Path(
 _API_TOKEN = secrets.token_urlsafe(32)
 _DESKTOP_MODE = False
 # INVARIANT (cache): Increment this whenever templates, JS, CSS, or icons change.
-_ASSET_VERSION = "20260819-5"
+_ASSET_VERSION = "20260902-1"
 autostart_manager = AutostartManager()
 
 app = Flask(
@@ -243,6 +243,7 @@ def api_pending():
     return jsonify(
         {
             **reminder_engine.snapshot(),
+            "notification": reminder_worker.notification_status(),
             "reminders": reminder_worker.drain_pending(),
         }
     )
@@ -331,10 +332,11 @@ def _run_desktop(debug: bool = False, start_hidden: bool = False) -> None:
     storage_path = _DATA_DIR / "webview"
     storage_path.mkdir(parents=True, exist_ok=True)
     icon_path = _desktop_icon_path()
+    window_title = os.environ.get("TAPTAP_SMOKE_WINDOW_TITLE", "TapTap")
 
     webview.settings["OPEN_EXTERNAL_LINKS_IN_BROWSER"] = True
     window = webview.create_window(
-        "TapTap",
+        window_title,
         app,
         width=1100,
         height=760,
@@ -345,7 +347,12 @@ def _run_desktop(debug: bool = False, start_hidden: bool = False) -> None:
         focus=not start_hidden,
     )
     lifecycle = (
-        WindowsDesktopLifecycle(window, icon_path, started_hidden=start_hidden)
+        WindowsDesktopLifecycle(
+            window,
+            icon_path,
+            started_hidden=start_hidden,
+            tray_text=os.environ.get("TAPTAP_SMOKE_TRAY_TEXT", "TapTap"),
+        )
         if sys.platform == "win32"
         else None
     )
@@ -446,7 +453,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.startup:
             logging.info("Ignoring duplicate Windows startup launch")
             return 0
-        if activate_existing_window():
+        if activate_existing_window(
+            os.environ.get("TAPTAP_SMOKE_WINDOW_TITLE", "TapTap")
+        ):
             logging.info("Activated the existing TapTap window")
             return 0
         _show_message("TapTap", "TapTap is already running.")

@@ -19,6 +19,19 @@ $testRoot = Join-Path $tempBase ("taptap-native-window-" + [guid]::NewGuid())
 $env:TAPTAP_DB_PATH = Join-Path $testRoot "events.db"
 $env:TAPTAP_DATA_DIR = Join-Path $testRoot "data"
 $env:TAPTAP_LOG_DIR = Join-Path $testRoot "logs"
+$runKeyPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+$runValueName = "TapTap"
+$savedRunValue = $null
+$hadRunValue = $false
+try {
+    $savedRunValue = (Get-ItemProperty -Path $runKeyPath -Name $runValueName).$runValueName
+    $hadRunValue = $true
+}
+catch {
+    $hadRunValue = $false
+}
+# A frozen test copy must never repair a user's real opt-in startup command.
+Remove-ItemProperty -Path $runKeyPath -Name $runValueName -ErrorAction SilentlyContinue
 
 New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
 $rootProcess = Start-Process -FilePath $resolvedExecutable -PassThru
@@ -69,4 +82,10 @@ finally {
     Get-Process -Name "TapTap" -ErrorAction SilentlyContinue |
         Where-Object { $existingIds -notcontains $_.Id } |
         Stop-Process -Force -ErrorAction SilentlyContinue
+    if ($hadRunValue) {
+        Set-ItemProperty -Path $runKeyPath -Name $runValueName -Value $savedRunValue
+    }
+    else {
+        Remove-ItemProperty -Path $runKeyPath -Name $runValueName -ErrorAction SilentlyContinue
+    }
 }

@@ -80,6 +80,7 @@ class DatabaseTests(unittest.TestCase):
         event = self.db.get_event(event_id)
         self.assertIsNone(event["last_reminded"])
         self.assertIsNone(event["snooze_until"])
+        self.assertEqual(event["schedule_revision"], 1)
 
     def test_editing_only_content_keeps_current_reminder_state(self) -> None:
         event_id = self.add_event()
@@ -105,6 +106,7 @@ class DatabaseTests(unittest.TestCase):
         event = self.db.get_event(event_id)
         self.assertEqual(event["last_reminded"], "30")
         self.assertEqual(event["snooze_until"], "2030-01-31 10:00:00")
+        self.assertEqual(event["schedule_revision"], 0)
 
     def test_concurrent_writes_do_not_lose_events(self) -> None:
         def insert(index: int) -> int:
@@ -162,6 +164,33 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["name"], "Existing event")
         self.assertEqual(events[0]["category"], "")
+        self.assertEqual(events[0]["schedule_revision"], 0)
+        with migrated._connect() as connection:
+            outbox = connection.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='table' AND name='reminder_outbox'"
+            ).fetchone()
+        self.assertIsNotNone(outbox)
+
+    def test_durable_popups_are_not_lost_after_one_hundred_rows(self) -> None:
+        with self.db._connect() as connection:
+            for index in range(101):
+                connection.execute(
+                    """
+                    INSERT INTO reminder_outbox
+                        (delivery_key, event_id, occurrence_at, offsets,
+                         title, message, created_at)
+                    VALUES (?, ?, '2030-01-02 12:00', '0', ?, 'Due', ?)
+                    """,
+                    (f"delivery-{index}", index + 1, f"Event {index}", "2030-01-02 12:00:00"),
+                )
+            connection.commit()
+
+        first = self.db.consume_delivery_popups()
+        second = self.db.consume_delivery_popups()
+
+        self.assertEqual(len(first), 100)
+        self.assertEqual(len(second), 1)
 
 
 if __name__ == "__main__":

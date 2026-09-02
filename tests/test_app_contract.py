@@ -77,6 +77,7 @@ class AppContractTests(unittest.TestCase):
         self.module.reminder_worker = ReminderWorker(
             self.module.reminder_engine,
             notifier=FakeNotifier(),
+            fallback_alert=lambda: None,
         )
         self.client = self.flask_app.test_client()
         self.headers = {"X-TapTap-Token": self.module._API_TOKEN}
@@ -350,7 +351,7 @@ class AppContractTests(unittest.TestCase):
         )
 
     def test_release_metadata_is_synchronized(self) -> None:
-        version = "0.3.0"
+        version = "0.3.1"
         root = Path(self.module.__file__).resolve().parent
 
         self.assertIn(
@@ -537,6 +538,8 @@ class AppContractTests(unittest.TestCase):
 
         pending = self.client.get("/api/pending", headers=self.headers).get_json()
         self.assertEqual([item["id"] for item in pending["reminders"]], [event_id])
+        self.assertEqual(pending["notification"]["state"], "unknown")
+        self.assertEqual(pending["notification"]["pending_deliveries"], 1)
         drained = self.client.get("/api/pending", headers=self.headers).get_json()
         self.assertEqual(drained["reminders"], [])
 

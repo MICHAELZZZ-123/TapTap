@@ -4,7 +4,7 @@ Native desktop event reminders built with Python, Flask, pywebview, and a local
 SQLite database. The interface is HTML/CSS/JavaScript, hosted inside a normal
 desktop window; no browser tab or terminal needs to stay open.
 
-Current source release: **0.3.0**. See [CHANGELOG.md](CHANGELOG.md) for the
+Current source release: **0.3.1**. See [CHANGELOG.md](CHANGELOG.md) for the
 release description.
 
 ## Run a packaged build
@@ -16,11 +16,13 @@ release description.
   native notifications to work.
 
 Minimizing the window keeps reminders active. On Windows, closing the window
-hides TapTap to the notification area so native notifications continue; use the
-tray icon's single left-click or **Open TapTap** action to reopen it, and
-**Quit TapTap** to fully stop it. Closing the window still quits TapTap on Linux
-and macOS. The operating system may ask for notification permission on first
-use.
+hides TapTap to the notification area while reminder delivery continues; use
+the tray icon's single left-click or **Open TapTap** action to reopen it, and
+**Quit TapTap** to fully stop it. Pending deliveries survive an application
+restart. If Windows blocks a native notification, TapTap retains it for retry
+and uses a system sound plus the visible in-app alert as a background fallback.
+Closing the window still quits TapTap on Linux and macOS. The operating system
+may ask for notification permission on first use.
 
 ### What's new in the current build
 
@@ -30,6 +32,8 @@ use.
   Windows user, without administrator access.
 - Reminder checks align to wall-clock seconds, with delayed startup and
   sleep/wake catch-up coalesced into one alert per event.
+- Claimed reminders are stored in a durable delivery outbox until notification
+  dispatch succeeds; failed native delivery is retried with bounded backoff.
 - The refreshed keyboard shortcuts, category picker, live clock, and
   long-range countdown make regular scheduling faster to operate.
 
@@ -41,11 +45,14 @@ hidden in the notification area at sign-in; it never requires administrator
 access. Opening `TapTap.exe` while that background instance is running restores
 the existing window instead of starting another reminder worker.
 
-Disabling the checkbox removes TapTap's startup entry. If an enabled portable
-executable is moved, opening it manually from the new location repairs the
-registered path. Turn the setting off before deleting the portable executable:
-without an installer, a deleted program cannot remove its own Windows startup
-entry. Windows Startup Apps can also disable the entry independently.
+Disabling the checkbox removes TapTap's startup entry. A different TapTap copy
+does not take over an existing valid startup registration merely by being
+opened. To transfer startup ownership, disable the setting in the registered
+copy and enable it in the intended copy. TapTap repairs the entry automatically
+only when the registered target is missing or invalid. Turn the setting off
+before deleting the portable executable: without an installer, a deleted
+program cannot remove its own Windows startup entry. Windows Startup Apps can
+also disable the entry independently.
 
 ## Run from source
 
@@ -78,8 +85,8 @@ sudo apt install libnss3 libxkbfile1 libxcb-cursor0 libxcb-icccm4 \
 | Feature | Detail |
 |---|---|
 | Native desktop window | Lightweight OS webview instead of an external browser |
-| Reliable reminders | Python worker checks on wall-clock second boundaries, including while minimized |
-| Native notifications | Linux, macOS, and Windows notifications with browser fallback |
+| Reliable reminders | Python worker checks on wall-clock second boundaries and stores delivery work durably until dispatched |
+| Native notifications | Linux, macOS, and Windows notifications with retry and a permission-independent Windows fallback |
 | Windows background mode | Close-to-tray with explicit Open and Quit actions while reminders continue |
 | Windows sign-in startup | Optional per-user launch directly into the notification area |
 | Reminders | Single or comma-separated offsets, such as `60, 30, 10` |
@@ -152,6 +159,25 @@ Windows release builds must pass both native checks:
 ./scripts/smoke_test_windows_window.ps1 -Executable ./dist/TapTap.exe
 ./scripts/smoke_test_windows_background.ps1 -Executable ./dist/TapTap.exe
 ```
+
+Then perform the disruptive checks that automation must not simulate:
+
+1. Enable **Start with Windows**, sign out, sign back in, and confirm that the
+   registered executable starts hidden with one reminder worker.
+2. Put Windows to sleep across a due reminder, wake it, and confirm that TapTap
+   catches up once without duplicating the alert.
+3. Deny Windows notification permission, trigger a reminder, and confirm that
+   TapTap reports native delivery as unavailable, retains the delivery for
+   retry, sounds the fallback, reveals its hidden window, and displays the
+   in-app reminder; restore permission and verify a later native delivery.
+4. Move the TapTap icon into the notification-area overflow and verify a real
+   left-click, **Open TapTap**, and **Quit TapTap** from that location.
+5. Shut down while TapTap is hidden, restart Windows, and confirm that startup
+   is clean and the HKCU registration still points to the intended executable.
+
+Record these as manual observations. Mocked close reasons or process-existence
+checks are not evidence of a real sign-out, shutdown, sleep, or permission
+transition.
 
 ## Project files
 
